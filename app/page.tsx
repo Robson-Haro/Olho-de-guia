@@ -22,6 +22,20 @@ import {
   Zap,
 } from "lucide-react";
 
+type ImportedJob = {
+  id: string;
+  code: string;
+  title: string;
+  city: string;
+  description: string;
+  responsibilities: string;
+  prerequisites: string;
+  additionalInformation: string;
+  department: string;
+  role: string;
+  status: string;
+};
+
 const nav = [
   { icon: Home, label: "Visão geral" },
   { icon: BriefcaseBusiness, label: "Vagas" },
@@ -37,6 +51,7 @@ export default function HomePage() {
     [jobCode, setJobCode] = useState(""),
     [loading, setLoading] = useState(false),
     [message, setMessage] = useState("");
+  const [importedJob, setImportedJob] = useState<ImportedJob | null>(null);
   const [jobEntryMode, setJobEntryMode] = useState<"gupy" | "manual">("gupy");
   const [manualJob, setManualJob] = useState({ title: "", city: "", description: "", keywords: "" });
   const [gupyToken, setGupyToken] = useState(""),
@@ -58,14 +73,14 @@ export default function HomePage() {
     }
     setLoading(true);
     setMessage("");
+    setImportedJob(null);
     try {
       const response = await fetch(`/api/gupy/jobs/${jobCode.trim()}`),
         data = await response.json();
       if (!response.ok)
         throw new Error(data.error || "Não foi possível importar a vaga.");
-      setMessage(
-        `Vaga ${data.job?.name || data.job?.title || jobCode} importada com sucesso.`,
-      );
+      setImportedJob(data.job);
+      setMessage(`Vaga ${data.job.title} importada com sucesso.`);
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Erro ao importar vaga.",
@@ -348,6 +363,29 @@ export default function HomePage() {
                       <input value={jobCode} onChange={(e) => setJobCode(e.target.value)} placeholder="Código da vaga" />
                       <button onClick={importJob} disabled={loading}>{loading ? "BUSCANDO..." : "IMPORTAR"} <Search size={17} /></button>
                     </div>
+                    {importedJob && (
+                      <div className="importedJobCard">
+                        <div className="sectionTitle">
+                          <div>
+                            <span className="kicker">VAGA IMPORTADA</span>
+                            <h3>{importedJob.title}</h3>
+                          </div>
+                          <CheckCircle2 size={25} />
+                        </div>
+                        <div className="jobMeta">
+                          {importedJob.city && <span><b>Cidade:</b> {importedJob.city}</span>}
+                          {importedJob.department && <span><b>Área:</b> {importedJob.department}</span>}
+                          {importedJob.code && <span><b>Código:</b> {importedJob.code}</span>}
+                        </div>
+                        {importedJob.description && <section><h4>Descrição</h4><div>{importedJob.description}</div></section>}
+                        {importedJob.responsibilities && <section><h4>Responsabilidades</h4><div>{importedJob.responsibilities}</div></section>}
+                        {importedJob.prerequisites && <section><h4>Requisitos</h4><div>{importedJob.prerequisites}</div></section>}
+                        {importedJob.additionalInformation && <section><h4>Informações adicionais</h4><div>{importedJob.additionalInformation}</div></section>}
+                        {!importedJob.description && !importedJob.responsibilities && !importedJob.prerequisites && (
+                          <p className="emptyJobDescription">A Gupy retornou a vaga, mas não enviou os campos de descrição para este token.</p>
+                        )}
+                      </div>
+                    )}
                   </>
                 ) : (
                   <div className="manualJobForm">
