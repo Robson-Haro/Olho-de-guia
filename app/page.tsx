@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Bird,
   BriefcaseBusiness,
@@ -50,6 +50,29 @@ type Candidate = {
   city: string;
   state: string;
   profileUrl?: string;
+  company?: string;
+  source?: string;
+  summary?: string;
+};
+
+type ProviderSearchStatus = {
+  provider: "apollo" | "serpapi";
+  label: string;
+  status: "success" | "error";
+  count: number;
+  message: string;
+};
+
+type TalentSourceStatus = {
+  provider: "apollo" | "serpapi";
+  label: string;
+  configured: boolean;
+  updatedAt: string | null;
+};
+
+type IntegrationState = {
+  status: "idle" | "working" | "success" | "error";
+  message: string;
 };
 
 const brazilStates = [
@@ -84,10 +107,11 @@ export default function HomePage() {
     keywords: ["", "", "", ""],
     nationwide: false,
   });
-  const [searchStatus, setSearchStatus] = useState<"idle" | "working" | "completed" | "error">("idle");
+  const [searchStatus, setSearchStatus] = useState<"idle" | "working" | "completed" | "empty" | "error">("idle");
   const [searchMessage, setSearchMessage] = useState("");
   const [searchStrategies, setSearchStrategies] = useState<SearchStrategy[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [providerResults, setProviderResults] = useState<ProviderSearchStatus[]>([]);
   const [selectedState, setSelectedState] = useState("");
   const [selectedCity, setSelectedCity] = useState("");
   const [gupyToken, setGupyToken] = useState(""),
@@ -96,12 +120,29 @@ export default function HomePage() {
       "idle" | "working" | "success" | "error"
     >("idle"),
     [configMessage, setConfigMessage] = useState("");
+  const [talentKeys, setTalentKeys] = useState({ apollo: "", serpapi: "" });
+  const [showTalentKeys, setShowTalentKeys] = useState({ apollo: false, serpapi: false });
+  const [talentSourceStatus, setTalentSourceStatus] = useState<TalentSourceStatus[]>([]);
+  const [talentIntegration, setTalentIntegration] = useState<Record<"apollo" | "serpapi", IntegrationState>>({
+    apollo: { status: "idle", message: "" },
+    serpapi: { status: "idle", message: "" },
+  });
   const stats = [
-    { label: "Perfis mapeados", value: "0", icon: UsersRound },
+    { label: "Perfis mapeados", value: String(candidates.length), icon: UsersRound },
     { label: "Alta aderência", value: "0", icon: Target },
     { label: "Shortlists ativas", value: "0", icon: ListChecks },
     { label: "Tempo economizado", value: "0h", icon: Zap },
   ];
+  useEffect(() => {
+    if (active !== "Configurações") return;
+    fetch("/api/admin/talent-source", { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Falha ao consultar fontes.");
+        setTalentSourceStatus(Array.isArray(data.sources) ? data.sources : []);
+      })
+      .catch(() => setTalentSourceStatus([]));
+  }, [active]);
   async function importJob() {
     if (!jobCode.trim()) {
       setMessage("Digite o código da vaga.");
@@ -168,6 +209,32 @@ export default function HomePage() {
       );
     }
   }
+  async function configureTalentSource(provider: "apollo" | "serpapi", action: "test" | "save") {
+    const apiKey = talentKeys[provider].trim();
+    if (!apiKey) {
+      setTalentIntegration((current) => ({ ...current, [provider]: { status: "error", message: "Cole a chave da API para continuar." } }));
+      return;
+    }
+    setTalentIntegration((current) => ({ ...current, [provider]: { status: "working", message: action === "save" ? "Testando e protegendo a chave..." : "Testando conexão..." } }));
+    try {
+      const response = await fetch("/api/admin/talent-source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, apiKey, action }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Falha na configuração.");
+      setTalentIntegration((current) => ({ ...current, [provider]: { status: "success", message: data.message } }));
+      if (action === "save") {
+        setTalentKeys((current) => ({ ...current, [provider]: "" }));
+        const statusResponse = await fetch("/api/admin/talent-source", { cache: "no-store" });
+        const statusData = await statusResponse.json();
+        if (statusResponse.ok) setTalentSourceStatus(Array.isArray(statusData.sources) ? statusData.sources : []);
+      }
+    } catch (error) {
+      setTalentIntegration((current) => ({ ...current, [provider]: { status: "error", message: error instanceof Error ? error.message : "Erro na configuração." } }));
+    }
+  }
   function updateKeyword(index: number, value: string) {
     setJobForm((current) => ({
       ...current,
@@ -180,6 +247,7 @@ export default function HomePage() {
     setMessage("Preencha os dados abaixo e inicie a busca.");
     setSearchStatus("idle");
     setSearchStrategies([]);
+    setProviderResults([]);
   }
   async function startSearch() {
     if (!jobForm.title.trim() || !jobForm.description.trim() || (!jobForm.nationwide && !jobForm.city.trim())) {
@@ -188,7 +256,9 @@ export default function HomePage() {
       return;
     }
     setSearchStatus("working");
-    setSearchMessage("Montando as buscas Boolean e X-Ray...");
+    setSearchMessage("Consultando fontes reais de profissionais...");
+    setProviderResults([]);
+    setCandidates([]);
     try {
       const response = await fetch("/api/search", {
         method: "POST",
@@ -196,14 +266,18 @@ export default function HomePage() {
         body: JSON.stringify(jobForm),
       });
       const data = await response.json();
+      setSearchStrategies(Array.isArray(data.strategies) ? data.strategies : []);
+      setProviderResults(Array.isArray(data.providers) ? data.providers : []);
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
-      setSearchStrategies(data.strategies);
-      setCandidates(Array.isArray(data.candidates) ? data.candidates : []);
+      const foundCandidates = Array.isArray(data.candidates) ? data.candidates : [];
+      setCandidates(foundCandidates);
       setSelectedState("");
       setSelectedCity("");
-      setSearchStatus("completed");
-      setSearchMessage(`Busca concluída. ${data.strategies.length} estratégias foram geradas${data.candidates?.length ? ` e ${data.candidates.length} perfis foram encontrados` : ". Ainda não há uma fonte automática de perfis conectada"}.`);
-      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, createdAt: new Date().toISOString() }));
+      setSearchStatus(foundCandidates.length ? "completed" : "empty");
+      setSearchMessage(foundCandidates.length
+        ? `Busca finalizada de verdade: ${foundCandidates.length} perfil(is) retornado(s) pelas fontes conectadas.`
+        : "Busca finalizada nas fontes conectadas, mas nenhum perfil correspondeu aos filtros. Tente ampliar o cargo, as palavras-chave ou a localização.");
+      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, candidates: foundCandidates, providers: data.providers, createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
       setSearchMessage(error instanceof Error ? error.message : "Erro ao iniciar busca.");
@@ -358,6 +432,74 @@ export default function HomePage() {
                 </button>
               </div>
             </article>
+            <article className="glass settingsCard talentSourcesCard">
+              <div className="sectionTitle">
+                <div>
+                  <span className="kicker">BUSCA AUTOMÁTICA REAL</span>
+                  <h2>Fontes de talentos</h2>
+                </div>
+                <Database size={30} />
+              </div>
+              <p>
+                Conecte ao menos uma fonte. As chaves são criptografadas e usadas
+                apenas no servidor para retornar profissionais reais ao Eureka.
+              </p>
+              <div className="talentSourceList">
+                {(["apollo", "serpapi"] as const).map((provider) => {
+                  const configured = talentSourceStatus.find((source) => source.provider === provider)?.configured;
+                  const integration = talentIntegration[provider];
+                  const label = provider === "apollo" ? "Apollo.io" : "SerpApi · Google X-Ray";
+                  return (
+                    <section className="talentSource" key={provider}>
+                      <div className="sourceHeading">
+                        <div>
+                          <strong>{label}</strong>
+                          <span>{provider === "apollo" ? "Cargo, palavras-chave, cidade e Brasil inteiro" : "Perfis públicos indexados pelo Google"}</span>
+                        </div>
+                        <span className={`sourceBadge ${configured ? "connected" : ""}`}>
+                          {configured ? "CONECTADA" : "NÃO CONFIGURADA"}
+                        </span>
+                      </div>
+                      <label>
+                        <span>Chave da API</span>
+                        <div className="secureInput">
+                          <ShieldCheck size={18} />
+                          <input
+                            type={showTalentKeys[provider] ? "text" : "password"}
+                            value={talentKeys[provider]}
+                            onChange={(event) => setTalentKeys((current) => ({ ...current, [provider]: event.target.value }))}
+                            placeholder={`Cole a chave ${label}`}
+                            autoComplete="off"
+                          />
+                          <button
+                            onClick={() => setShowTalentKeys((current) => ({ ...current, [provider]: !current[provider] }))}
+                            aria-label="Mostrar ou ocultar chave"
+                          >
+                            {showTalentKeys[provider] ? <EyeOff size={18} /> : <Eye size={18} />}
+                          </button>
+                        </div>
+                      </label>
+                      {provider === "apollo" && (
+                        <small className="creditNote">A pesquisa inicial não consome créditos; carregar até 10 perfis completos pode consumir créditos de enriquecimento do seu plano.</small>
+                      )}
+                      {integration.message && (
+                        <div className={`configNotice ${integration.status}`}>
+                          {integration.status === "success" ? <CheckCircle2 size={18} /> : <ShieldCheck size={18} />}
+                          <span>{integration.message}</span>
+                        </div>
+                      )}
+                      <div className="configActions compactActions">
+                        <button className="secondary" disabled={integration.status === "working"} onClick={() => configureTalentSource(provider, "test")}>TESTAR</button>
+                        <button className={`primary ${configured ? "saved" : ""}`} disabled={integration.status === "working"} onClick={() => configureTalentSource(provider, "save")}>
+                          <ShieldCheck size={18} />
+                          {integration.status === "working" ? "PROCESSANDO..." : configured ? "ATUALIZAR CONEXÃO" : "SALVAR E ATIVAR"}
+                        </button>
+                      </div>
+                    </section>
+                  );
+                })}
+              </div>
+            </article>
             <aside className="glass setupGuide">
               <span className="kicker">STATUS DA INTEGRAÇÃO</span>
               <h3>Como funciona</h3>
@@ -372,7 +514,7 @@ export default function HomePage() {
                   <b>As analistas</b> inserem somente o código da vaga.
                 </li>
                 <li>
-                  <b>O agente</b> importa os dados diretamente da Gupy.
+                  <b>O agente</b> importa a vaga da Gupy e consulta as fontes de talentos.
                 </li>
               </ol>
               <div className="privateBadge">
@@ -459,11 +601,18 @@ export default function HomePage() {
                   <label><span>Cidade da vaga *</span><input value={jobForm.city} onChange={(e) => setJobForm({ ...jobForm, city: e.target.value })} placeholder="Cidade importada ou principal" /></label>
                   <label><span>Acrescentar outra cidade</span><input value={jobForm.additionalCity} onChange={(e) => setJobForm({ ...jobForm, additionalCity: e.target.value })} placeholder="Opcional: região ou cidade adicional" /></label>
                   <label className="full nationwideToggle"><input type="checkbox" checked={jobForm.nationwide} onChange={(e) => setJobForm({ ...jobForm, nationwide: e.target.checked })} /><span><strong>Brasil inteiro — todas as cidades</strong><small>Use esta opção para mapear profissionais em qualquer localidade do país.</small></span></label>
-                  <button className={`primary full searchButton ${searchStatus === "completed" ? "activated" : ""}`} onClick={startSearch} disabled={searchStatus === "working"}>
+                  <button className={`primary full searchButton ${searchStatus === "completed" ? "activated" : ""} ${searchStatus === "empty" ? "finishedEmpty" : ""}`} onClick={startSearch} disabled={searchStatus === "working"}>
                     {searchStatus === "completed" ? <CheckCircle2 size={21} /> : <Crosshair size={21} />}
-                    {searchStatus === "working" ? "BUSCANDO TALENTOS..." : searchStatus === "completed" ? "BUSCA CONCLUÍDA" : "INICIAR BUSCA DE TALENTOS"}
+                    {searchStatus === "working" ? "BUSCANDO TALENTOS..." : searchStatus === "completed" ? `BUSCA CONCLUÍDA · ${candidates.length} PERFIS` : searchStatus === "empty" ? "BUSCA FINALIZADA · 0 PERFIS" : "INICIAR BUSCA DE TALENTOS"}
                   </button>
                   {searchMessage && <div className={`searchSignal full ${searchStatus}`}><span className="signalDot" />{searchMessage}</div>}
+                  {providerResults.length > 0 && <div className="providerRunList full">
+                    {providerResults.map((provider) => <div key={provider.provider} className={provider.status}>
+                      <span className="signalDot" />
+                      <strong>{provider.label}</strong>
+                      <span>{provider.message}</span>
+                    </div>)}
+                  </div>}
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
@@ -481,12 +630,27 @@ export default function HomePage() {
                     Ver todos <ChevronRight size={16} />
                   </button>
                 </div>
-                {searchStrategies.length ? <div className="strategyList">
-                  {searchStrategies.map((strategy) => <a key={strategy.label} href={strategy.url} target="_blank" rel="noreferrer"><div><strong>{strategy.label}</strong><span>{strategy.query}</span></div><ChevronRight size={20} /></a>)}
-                </div> : <div className="emptyState"><UsersRound size={38} /><strong>Nenhuma busca ativada</strong><span>Preencha a vaga e clique no botão de busca para gerar as estratégias reais.</span></div>}
+                {candidates.length > 0 ? <div className="resultCandidateList">
+                  {candidates.map((candidate) => <a key={candidate.id} href={candidate.profileUrl || "#"} target={candidate.profileUrl ? "_blank" : undefined} rel="noreferrer">
+                    <CircleUserRound size={34} />
+                    <div>
+                      <strong>{candidate.name}</strong>
+                      <span>{candidate.title}{candidate.company ? ` · ${candidate.company}` : ""}</span>
+                      <small>{[candidate.city, candidate.state].filter(Boolean).join("/") || "Localidade não informada"} · {candidate.source}</small>
+                      {candidate.summary && <p>{candidate.summary}</p>}
+                    </div>
+                    <ChevronRight size={20} />
+                  </a>)}
+                </div> : <div className="emptyState"><UsersRound size={38} /><strong>{searchStatus === "working" ? "Busca em andamento" : searchStatus === "empty" ? "Busca finalizada sem perfis" : searchStatus === "error" ? "A busca automática não foi executada" : "Nenhuma busca ativada"}</strong><span>{searchStatus === "error" ? "Confira o aviso e conecte uma fonte de talentos em Configurações." : "Preencha a vaga e consulte as fontes conectadas."}</span></div>}
+                {searchStrategies.length > 0 && <div className="manualSearches">
+                  <span className="kicker">PESQUISA MANUAL COMPLEMENTAR</span>
+                  <div className="strategyList">
+                    {searchStrategies.map((strategy) => <a key={strategy.label} href={strategy.url} target="_blank" rel="noreferrer"><div><strong>{strategy.label}</strong><span>{strategy.query}</span></div><ChevronRight size={20} /></a>)}
+                  </div>
+                </div>}
               </article>
             </section>
-            {searchStatus === "completed" && (
+            {candidates.length > 0 && (
               <section className="glass geoPanel">
                 <div className="sectionTitle"><div><span className="kicker">INTELIGÊNCIA GEOGRÁFICA</span><h3>Mapa de talentos no Brasil</h3><p>{candidates.length ? `${candidates.length} perfis distribuídos por estado e cidade.` : "O mapa será preenchido quando uma fonte de perfis retornar candidatos reais."}</p></div><MapPinned size={30} /></div>
                 <div className="geoGrid">
