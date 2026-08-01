@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   Bird,
   BriefcaseBusiness,
@@ -22,32 +22,6 @@ import {
   Zap,
 } from "lucide-react";
 
-const candidates = [
-  {
-    name: "Mariana Costa",
-    role: "Coordenadora de Logística",
-    company: "JBS",
-    city: "Campinas, SP",
-    score: 94,
-    skills: ["SAP", "Inbound", "Gestão"],
-  },
-  {
-    name: "Carlos Méndez",
-    role: "Supply Chain Manager",
-    company: "Sigma",
-    city: "Monterrey, MX",
-    score: 89,
-    skills: ["S&OP", "Perecíveis", "English"],
-  },
-  {
-    name: "Juliana Alves",
-    role: "Analista de Operações Sênior",
-    company: "BRF",
-    city: "Barretos, SP",
-    score: 86,
-    skills: ["Power BI", "Outbound", "Indicadores"],
-  },
-];
 const nav = [
   { icon: Home, label: "Visão geral" },
   { icon: BriefcaseBusiness, label: "Vagas" },
@@ -63,36 +37,20 @@ export default function HomePage() {
     [jobCode, setJobCode] = useState(""),
     [loading, setLoading] = useState(false),
     [message, setMessage] = useState("");
+  const [jobEntryMode, setJobEntryMode] = useState<"gupy" | "manual">("gupy");
+  const [manualJob, setManualJob] = useState({ title: "", city: "", description: "", keywords: "" });
   const [gupyToken, setGupyToken] = useState(""),
     [showToken, setShowToken] = useState(false),
     [configStatus, setConfigStatus] = useState<
       "idle" | "working" | "success" | "error"
     >("idle"),
     [configMessage, setConfigMessage] = useState("");
-  const stats = useMemo(
-    () => [
-      {
-        label: "Perfis mapeados",
-        value: "1.284",
-        change: "+18%",
-        icon: UsersRound,
-      },
-      { label: "Alta aderência", value: "327", change: "+12%", icon: Target },
-      {
-        label: "Shortlists ativas",
-        value: "24",
-        change: "+6",
-        icon: ListChecks,
-      },
-      {
-        label: "Tempo economizado",
-        value: "196h",
-        change: "este mês",
-        icon: Zap,
-      },
-    ],
-    [],
-  );
+  const stats = [
+    { label: "Perfis mapeados", value: "0", icon: UsersRound },
+    { label: "Alta aderência", value: "0", icon: Target },
+    { label: "Shortlists ativas", value: "0", icon: ListChecks },
+    { label: "Tempo economizado", value: "0h", icon: Zap },
+  ];
   async function importJob() {
     if (!jobCode.trim()) {
       setMessage("Digite o código da vaga.");
@@ -148,6 +106,21 @@ export default function HomePage() {
       );
     }
   }
+  function saveManualJob() {
+    if (!manualJob.title.trim() || !manualJob.city.trim() || !manualJob.description.trim()) {
+      setMessage("Preencha o título, a cidade e a descrição da vaga.");
+      return;
+    }
+    const savedJobs = JSON.parse(localStorage.getItem("eureca_manual_jobs") || "[]");
+    savedJobs.push({
+      ...manualJob,
+      keywords: manualJob.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean),
+      createdAt: new Date().toISOString(),
+    });
+    localStorage.setItem("eureca_manual_jobs", JSON.stringify(savedJobs));
+    setMessage(`Vaga ${manualJob.title.trim()} cadastrada manualmente com sucesso.`);
+    setManualJob({ title: "", city: "", description: "", keywords: "" });
+  }
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -156,7 +129,7 @@ export default function HomePage() {
             <Bird size={30} />
           </div>
           <div>
-            <strong>OLHO DE ÁGUIA</strong>
+            <strong>EURECA</strong>
             <span>TALENT HUNTER</span>
           </div>
         </div>
@@ -199,8 +172,8 @@ export default function HomePage() {
             <div className="profile">
               <div className="statusDot" />
               <div>
-                <strong>Robson Ramos</strong>
-                <span>Administrador</span>
+                <strong>Usuário</strong>
+                <span>Sistema Eureca</span>
               </div>
               <CircleUserRound size={36} />
             </div>
@@ -345,14 +318,13 @@ export default function HomePage() {
               </div>
             </section>
             <section className="stats">
-              {stats.map(({ label, value, change, icon: Icon }) => (
+              {stats.map(({ label, value, icon: Icon }) => (
                 <article className="glass" key={label}>
                   <div className="icon">
                     <Icon size={21} />
                   </div>
                   <span>{label}</span>
                   <strong>{value}</strong>
-                  <small>{change}</small>
                 </article>
               ))}
             </section>
@@ -360,25 +332,32 @@ export default function HomePage() {
               <article className="glass import">
                 <div className="sectionTitle">
                   <div>
-                    <span className="kicker">INTEGRAÇÃO GUPY</span>
-                    <h3>Importar uma vaga</h3>
+                    <span className="kicker">NOVA VAGA</span>
+                    <h3>Como deseja inserir?</h3>
                   </div>
                   <ShieldCheck size={24} />
                 </div>
-                <p>
-                  Informe somente o código. O agente prepara os critérios e a
-                  estratégia.
-                </p>
-                <div className="jobInput">
-                  <input
-                    value={jobCode}
-                    onChange={(e) => setJobCode(e.target.value)}
-                    placeholder="Ex.: 12345678"
-                  />
-                  <button onClick={importJob} disabled={loading}>
-                    {loading ? "BUSCANDO..." : "IMPORTAR"} <Search size={17} />
-                  </button>
+                <div className="entryTabs">
+                  <button className={jobEntryMode === "gupy" ? "active" : ""} onClick={() => { setJobEntryMode("gupy"); setMessage(""); }}>IMPORTAR DA GUPY</button>
+                  <button className={jobEntryMode === "manual" ? "active" : ""} onClick={() => { setJobEntryMode("manual"); setMessage(""); }}>CADASTRAR MANUALMENTE</button>
                 </div>
+                {jobEntryMode === "gupy" ? (
+                  <>
+                    <p>Informe somente o código da vaga na Gupy.</p>
+                    <div className="jobInput">
+                      <input value={jobCode} onChange={(e) => setJobCode(e.target.value)} placeholder="Código da vaga" />
+                      <button onClick={importJob} disabled={loading}>{loading ? "BUSCANDO..." : "IMPORTAR"} <Search size={17} /></button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="manualJobForm">
+                    <label><span>Título da vaga *</span><input value={manualJob.title} onChange={(e) => setManualJob({ ...manualJob, title: e.target.value })} placeholder="Ex.: Analista de Logística" /></label>
+                    <label><span>Cidade *</span><input value={manualJob.city} onChange={(e) => setManualJob({ ...manualJob, city: e.target.value })} placeholder="Ex.: Barretos, SP" /></label>
+                    <label className="full"><span>Descrição da vaga *</span><textarea value={manualJob.description} onChange={(e) => setManualJob({ ...manualJob, description: e.target.value })} placeholder="Cole ou escreva a descrição completa da vaga" rows={6} /></label>
+                    <label className="full"><span>Palavras-chave</span><input value={manualJob.keywords} onChange={(e) => setManualJob({ ...manualJob, keywords: e.target.value })} placeholder="Separe por vírgulas: SAP, logística, indicadores" /></label>
+                    <button className="primary full" onClick={saveManualJob}><BriefcaseBusiness size={18} /> SALVAR VAGA MANUAL</button>
+                  </div>
+                )}
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
                   <ShieldCheck size={16} /> Token protegido e visível apenas ao
@@ -395,38 +374,17 @@ export default function HomePage() {
                     Ver todos <ChevronRight size={16} />
                   </button>
                 </div>
-                {candidates.map((c) => (
-                  <div className="candidate" key={c.name}>
-                    <div className="avatar">
-                      {c.name
-                        .split(" ")
-                        .map((n) => n[0])
-                        .slice(0, 2)}
-                    </div>
-                    <div className="person">
-                      <strong>{c.name}</strong>
-                      <span>
-                        {c.role} · {c.company}
-                      </span>
-                      <small>{c.city}</small>
-                      <div>
-                        {c.skills.map((s) => (
-                          <b key={s}>{s}</b>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="score">
-                      <strong>{c.score}%</strong>
-                      <span>aderência</span>
-                    </div>
-                  </div>
-                ))}
+                <div className="emptyState">
+                  <UsersRound size={38} />
+                  <strong>Nenhum candidato mapeado</strong>
+                  <span>Os resultados reais aparecerão aqui após iniciar uma busca.</span>
+                </div>
               </article>
             </section>
           </>
         )}
         <footer>
-          <span>Olho de Águia v0.2 · Minerva Talent Intelligence</span>
+          <span>Eureca · Minerva Talent Intelligence</span>
           <span>
             <span className="live" /> Sistema preparado
           </span>
