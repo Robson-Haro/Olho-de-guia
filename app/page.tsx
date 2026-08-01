@@ -36,6 +36,12 @@ type ImportedJob = {
   status: string;
 };
 
+type SearchStrategy = {
+  label: string;
+  query: string;
+  url: string;
+};
+
 const nav = [
   { icon: Home, label: "Visão geral" },
   { icon: BriefcaseBusiness, label: "Vagas" },
@@ -53,7 +59,16 @@ export default function HomePage() {
     [message, setMessage] = useState("");
   const [importedJob, setImportedJob] = useState<ImportedJob | null>(null);
   const [jobEntryMode, setJobEntryMode] = useState<"gupy" | "manual">("gupy");
-  const [manualJob, setManualJob] = useState({ title: "", city: "", description: "", keywords: "" });
+  const [jobForm, setJobForm] = useState({
+    title: "",
+    city: "",
+    additionalCity: "",
+    description: "",
+    keywords: ["", "", "", ""],
+  });
+  const [searchStatus, setSearchStatus] = useState<"idle" | "working" | "active" | "error">("idle");
+  const [searchMessage, setSearchMessage] = useState("");
+  const [searchStrategies, setSearchStrategies] = useState<SearchStrategy[]>([]);
   const [gupyToken, setGupyToken] = useState(""),
     [showToken, setShowToken] = useState(false),
     [configStatus, setConfigStatus] = useState<
@@ -80,6 +95,17 @@ export default function HomePage() {
       if (!response.ok)
         throw new Error(data.error || "Não foi possível importar a vaga.");
       setImportedJob(data.job);
+      setJobForm((current) => ({
+        ...current,
+        title: data.job.title || "",
+        city: data.job.city || "",
+        description: [
+          data.job.description,
+          data.job.responsibilities,
+          data.job.prerequisites,
+          data.job.additionalInformation,
+        ].filter(Boolean).join("\n\n"),
+      }));
       setMessage(`Vaga ${data.job.title} importada com sucesso.`);
     } catch (error) {
       setMessage(
@@ -121,20 +147,43 @@ export default function HomePage() {
       );
     }
   }
-  function saveManualJob() {
-    if (!manualJob.title.trim() || !manualJob.city.trim() || !manualJob.description.trim()) {
-      setMessage("Preencha o título, a cidade e a descrição da vaga.");
+  function updateKeyword(index: number, value: string) {
+    setJobForm((current) => ({
+      ...current,
+      keywords: current.keywords.map((keyword, keywordIndex) => keywordIndex === index ? value : keyword),
+    }));
+  }
+  function prepareManualJob() {
+    setImportedJob(null);
+    setJobForm({ title: "", city: "", additionalCity: "", description: "", keywords: ["", "", "", ""] });
+    setMessage("Preencha os dados abaixo e inicie a busca.");
+    setSearchStatus("idle");
+    setSearchStrategies([]);
+  }
+  async function startSearch() {
+    if (!jobForm.title.trim() || !jobForm.description.trim() || !jobForm.city.trim()) {
+      setSearchStatus("error");
+      setSearchMessage("Preencha o título, a descrição e a cidade antes de buscar.");
       return;
     }
-    const savedJobs = JSON.parse(localStorage.getItem("eureca_manual_jobs") || "[]");
-    savedJobs.push({
-      ...manualJob,
-      keywords: manualJob.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean),
-      createdAt: new Date().toISOString(),
-    });
-    localStorage.setItem("eureca_manual_jobs", JSON.stringify(savedJobs));
-    setMessage(`Vaga ${manualJob.title.trim()} cadastrada manualmente com sucesso.`);
-    setManualJob({ title: "", city: "", description: "", keywords: "" });
+    setSearchStatus("working");
+    setSearchMessage("Montando as buscas Boolean e X-Ray...");
+    try {
+      const response = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(jobForm),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
+      setSearchStrategies(data.strategies);
+      setSearchStatus("active");
+      setSearchMessage(`Busca ativada com ${data.strategies.length} estratégias prontas.`);
+      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, createdAt: new Date().toISOString() }));
+    } catch (error) {
+      setSearchStatus("error");
+      setSearchMessage(error instanceof Error ? error.message : "Erro ao iniciar busca.");
+    }
   }
   return (
     <main className="shell">
@@ -352,50 +401,30 @@ export default function HomePage() {
                   </div>
                   <ShieldCheck size={24} />
                 </div>
-                <div className="entryTabs">
-                  <button className={jobEntryMode === "gupy" ? "active" : ""} onClick={() => { setJobEntryMode("gupy"); setMessage(""); }}>IMPORTAR DA GUPY</button>
-                  <button className={jobEntryMode === "manual" ? "active" : ""} onClick={() => { setJobEntryMode("manual"); setMessage(""); }}>CADASTRAR MANUALMENTE</button>
+                <div className="entryTabs topEntryTabs">
+                  <button className={jobEntryMode === "gupy" ? "active" : ""} onClick={() => { setJobEntryMode("gupy"); setMessage(""); }}>USAR CÓDIGO DA GUPY</button>
+                  <button className={jobEntryMode === "manual" ? "active" : ""} onClick={() => { setJobEntryMode("manual"); prepareManualJob(); }}>INSERIR MANUALMENTE</button>
                 </div>
-                {jobEntryMode === "gupy" ? (
-                  <>
-                    <p>Informe somente o código da vaga na Gupy.</p>
-                    <div className="jobInput">
-                      <input value={jobCode} onChange={(e) => setJobCode(e.target.value)} placeholder="Código da vaga" />
-                      <button onClick={importJob} disabled={loading}>{loading ? "BUSCANDO..." : "IMPORTAR"} <Search size={17} /></button>
-                    </div>
-                    {importedJob && (
-                      <div className="importedJobCard">
-                        <div className="sectionTitle">
-                          <div>
-                            <span className="kicker">VAGA IMPORTADA</span>
-                            <h3>{importedJob.title}</h3>
-                          </div>
-                          <CheckCircle2 size={25} />
-                        </div>
-                        <div className="jobMeta">
-                          {importedJob.city && <span><b>Cidade:</b> {importedJob.city}</span>}
-                          {importedJob.department && <span><b>Área:</b> {importedJob.department}</span>}
-                          {importedJob.code && <span><b>Código:</b> {importedJob.code}</span>}
-                        </div>
-                        {importedJob.description && <section><h4>Descrição</h4><div>{importedJob.description}</div></section>}
-                        {importedJob.responsibilities && <section><h4>Responsabilidades</h4><div>{importedJob.responsibilities}</div></section>}
-                        {importedJob.prerequisites && <section><h4>Requisitos</h4><div>{importedJob.prerequisites}</div></section>}
-                        {importedJob.additionalInformation && <section><h4>Informações adicionais</h4><div>{importedJob.additionalInformation}</div></section>}
-                        {!importedJob.description && !importedJob.responsibilities && !importedJob.prerequisites && (
-                          <p className="emptyJobDescription">A Gupy retornou a vaga, mas não enviou os campos de descrição para este token.</p>
-                        )}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="manualJobForm">
-                    <label><span>Título da vaga *</span><input value={manualJob.title} onChange={(e) => setManualJob({ ...manualJob, title: e.target.value })} placeholder="Ex.: Analista de Logística" /></label>
-                    <label><span>Cidade *</span><input value={manualJob.city} onChange={(e) => setManualJob({ ...manualJob, city: e.target.value })} placeholder="Ex.: Barretos, SP" /></label>
-                    <label className="full"><span>Descrição da vaga *</span><textarea value={manualJob.description} onChange={(e) => setManualJob({ ...manualJob, description: e.target.value })} placeholder="Cole ou escreva a descrição completa da vaga" rows={6} /></label>
-                    <label className="full"><span>Palavras-chave</span><input value={manualJob.keywords} onChange={(e) => setManualJob({ ...manualJob, keywords: e.target.value })} placeholder="Separe por vírgulas: SAP, logística, indicadores" /></label>
-                    <button className="primary full" onClick={saveManualJob}><BriefcaseBusiness size={18} /> SALVAR VAGA MANUAL</button>
+                {jobEntryMode === "gupy" && (
+                  <div className="jobInput topJobInput">
+                    <input value={jobCode} onChange={(e) => setJobCode(e.target.value)} placeholder="Digite o código ou ID da vaga" />
+                    <button onClick={importJob} disabled={loading}>{loading ? "PUXANDO..." : "PUXAR VAGA"} <Search size={17} /></button>
                   </div>
                 )}
+                <div className="searchForm">
+                  <label><span>Título da vaga *</span><input value={jobForm.title} onChange={(e) => setJobForm({ ...jobForm, title: e.target.value })} placeholder="Ex.: Analista de Logística" /></label>
+                  <label className="full"><span>Descrição da vaga — revise e altere como desejar *</span><textarea value={jobForm.description} onChange={(e) => setJobForm({ ...jobForm, description: e.target.value })} placeholder="A descrição importada aparecerá aqui, ou você pode escrever manualmente" rows={9} /></label>
+                  <fieldset className="full keywordFields"><legend>Palavras-chave para a busca</legend>
+                    {jobForm.keywords.map((keyword, index) => <input key={index} value={keyword} onChange={(e) => updateKeyword(index, e.target.value)} placeholder={`Palavra-chave ${index + 1}`} />)}
+                  </fieldset>
+                  <label><span>Cidade da vaga *</span><input value={jobForm.city} onChange={(e) => setJobForm({ ...jobForm, city: e.target.value })} placeholder="Cidade importada ou principal" /></label>
+                  <label><span>Acrescentar outra cidade</span><input value={jobForm.additionalCity} onChange={(e) => setJobForm({ ...jobForm, additionalCity: e.target.value })} placeholder="Opcional: região ou cidade adicional" /></label>
+                  <button className={`primary full searchButton ${searchStatus === "active" ? "activated" : ""}`} onClick={startSearch} disabled={searchStatus === "working"}>
+                    {searchStatus === "active" ? <CheckCircle2 size={21} /> : <Crosshair size={21} />}
+                    {searchStatus === "working" ? "ATIVANDO BUSCA..." : searchStatus === "active" ? "BUSCA ATIVADA" : "INICIAR BUSCA DE TALENTOS"}
+                  </button>
+                  {searchMessage && <div className={`searchSignal full ${searchStatus}`}><span className="signalDot" />{searchMessage}</div>}
+                </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
                   <ShieldCheck size={16} /> Token protegido e visível apenas ao
@@ -412,11 +441,9 @@ export default function HomePage() {
                     Ver todos <ChevronRight size={16} />
                   </button>
                 </div>
-                <div className="emptyState">
-                  <UsersRound size={38} />
-                  <strong>Nenhum candidato mapeado</strong>
-                  <span>Os resultados reais aparecerão aqui após iniciar uma busca.</span>
-                </div>
+                {searchStrategies.length ? <div className="strategyList">
+                  {searchStrategies.map((strategy) => <a key={strategy.label} href={strategy.url} target="_blank" rel="noreferrer"><div><strong>{strategy.label}</strong><span>{strategy.query}</span></div><ChevronRight size={20} /></a>)}
+                </div> : <div className="emptyState"><UsersRound size={38} /><strong>Nenhuma busca ativada</strong><span>Preencha a vaga e clique no botão de busca para gerar as estratégias reais.</span></div>}
               </article>
             </section>
           </>
