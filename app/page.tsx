@@ -129,7 +129,7 @@ export default function HomePage() {
             <Bird size={30} />
           </div>
           <div>
-            <strong>EURECA</strong>
+            <strong>EUREKA</strong>
             <span>TALENT HUNTER</span>
           </div>
         </div>
@@ -173,7 +173,7 @@ export default function HomePage() {
               <div className="statusDot" />
               <div>
                 <strong>Usuário</strong>
-                <span>Sistema Eureca</span>
+                <span>Sistema Eureka</span>
               </div>
               <CircleUserRound size={36} />
             </div>
@@ -384,7 +384,7 @@ export default function HomePage() {
           </>
         )}
         <footer>
-          <span>Eureca · Minerva Talent Intelligence</span>
+          <span>Eureka · Minerva Talent Intelligence</span>
           <span>
             <span className="live" /> Sistema preparado
           </span>
