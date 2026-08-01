@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { searchTalentSources } from "@/lib/talent-sources";
 
 type SearchRequest = {
   title?: string;
@@ -13,35 +14,86 @@ function clean(value: unknown, limit = 500) {
   return typeof value === "string" ? value.trim().slice(0, limit) : "";
 }
 
+function manualStrategies(title: string, city: string, additionalCity: string, keywords: string[], nationwide: boolean) {
+  const locations = nationwide
+    ? '"Brasil" OR "Brazil"'
+    : [city, additionalCity].filter(Boolean).map((item) => `"${item}"`).join(" OR ");
+  const skills = keywords.map((item) => `"${item}"`).join(" AND ");
+  const base = [`"${title}"`, skills, `(${locations})`].filter(Boolean).join(" AND ");
+  return [
+    { label: "LinkedIn via Google — pesquisa manual", query: `site:linkedin.com/in/ ${base}` },
+    { label: "Currículos públicos — pesquisa manual", query: `${base} (currículo OR resume OR perfil profissional)` },
+    { label: "LinkedIn Brasil — pesquisa manual", query: `site:br.linkedin.com/in/ "${title}" (${locations}) ${skills}` },
+  ].map(({ label, query }) => ({
+    label,
+    query,
+    url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+  }));
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json() as SearchRequest;
     const title = clean(body.title, 150);
     const city = clean(body.city, 100);
     const additionalCity = clean(body.additionalCity, 100);
+    const description = clean(body.description, 10000);
     const nationwide = body.nationwide === true;
-    const keywords = Array.isArray(body.keywords) ? body.keywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 4) : [];
-    if (!title || (!nationwide && !city) || !clean(body.description, 10000)) {
-      return NextResponse.json({ error: "Título, descrição e cidade são obrigatórios, exceto em buscas para todo o Brasil." }, { status: 400 });
+    const keywords = Array.isArray(body.keywords)
+      ? body.keywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 4)
+      : [];
+    if (!title || !description || (!nationwide && !city)) {
+      return NextResponse.json(
+        { error: "Título, descrição e cidade são obrigatórios, exceto em buscas para todo o Brasil." },
+        { status: 400 },
+      );
     }
 
-    const locations = nationwide
-      ? '"Brasil" OR "Brazil"'
-      : [city, additionalCity].filter(Boolean).map((item) => `"${item}"`).join(" OR ");
-    const skills = keywords.map((item) => `"${item}"`).join(" AND ");
-    const base = [`"${title}"`, skills, `(${locations})`].filter(Boolean).join(" AND ");
-    const strategies = [
-      { label: "LinkedIn — perfis", query: `site:linkedin.com/in ${base}`, engine: "google" },
-      { label: "Busca ampla no Google", query: `${base} (currículo OR resume OR perfil)`, engine: "google" },
-      { label: "LinkedIn — variação regional", query: `site:br.linkedin.com/in "${title}" (${locations}) ${skills}`, engine: "google" },
-      { label: "Busca complementar no Bing", query: `${base} perfil profissional`, engine: "bing" },
-    ].map(({ label, query, engine }) => ({
-      label,
-      query,
-      url: engine === "bing" ? `https://www.bing.com/search?q=${encodeURIComponent(query)}` : `https://www.google.com/search?q=${encodeURIComponent(query)}`,
-    }));
-    return NextResponse.json({ ok: true, strategies, candidates: [], completed: true });
-  } catch {
-    return NextResponse.json({ error: "Não foi possível montar a busca." }, { status: 400 });
+    const strategies = manualStrategies(title, city, additionalCity, keywords, nationwide);
+    const result = await searchTalentSources({
+      title,
+      city,
+      additionalCity,
+      description,
+      keywords,
+      nationwide,
+    });
+
+    if (!result.configured) {
+      return NextResponse.json({
+        error: "Nenhuma fonte automática de talentos está configurada. Abra Configurações e conecte Apollo.io ou SerpApi.",
+        code: "TALENT_SOURCE_NOT_CONFIGURED",
+        completed: false,
+        candidates: [],
+        providers: [],
+        strategies,
+      }, { status: 503 });
+    }
+
+    const succeeded = result.providers.filter((provider) => provider.status === "success");
+    if (!succeeded.length) {
+      return NextResponse.json({
+        error: result.providers.map((provider) => provider.message).join(" "),
+        code: "ALL_TALENT_SOURCES_FAILED",
+        completed: false,
+        candidates: [],
+        providers: result.providers,
+        strategies,
+      }, { status: 502 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      completed: true,
+      candidates: result.candidates,
+      total: result.candidates.length,
+      providers: result.providers,
+      strategies,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Não foi possível executar a busca." },
+      { status: 500 },
+    );
   }
 }
