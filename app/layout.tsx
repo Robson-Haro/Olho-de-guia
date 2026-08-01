@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import './settings.css';
+import './navigation.css';
 
 export const metadata: Metadata = { title: 'Olho de Águia | Talent Hunter', description: 'Inteligência de hunting e gestão de candidatos' };
 
