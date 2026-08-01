@@ -16,11 +16,16 @@ function encryptionKey() {
   return crypto.createHash('sha256').update(secret).digest();
 }
 
+export function isAdminAccessConfigured() {
+  return Boolean(process.env.ADMIN_ACCESS_KEY?.trim());
+}
+
 export function isAdminKeyValid(value: string | null) {
-  const expected = process.env.ADMIN_ACCESS_KEY;
-  if (!expected || !value) return false;
-  const a = Buffer.from(value);
-  const b = Buffer.from(expected);
+  const expected = process.env.ADMIN_ACCESS_KEY?.trim();
+  const received = value?.trim();
+  if (!expected || !received) return false;
+  const a = Buffer.from(received, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
@@ -51,8 +56,8 @@ export async function saveGupyToken(token: string) {
 }
 
 export async function testGupyToken(token: string) {
-  const base = process.env.GUPY_API_BASE_URL || 'https://api.gupy.io/api/v1';
-  const response = await fetch(`${base}/jobs?limit=1`, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, cache: 'no-store' });
+  const base = (process.env.GUPY_API_BASE_URL || 'https://api.gupy.io/api/v1').replace(/\/$/, '');
+  const response = await fetch(`${base}/jobs?limit=1`, { headers: { Authorization: `Bearer ${token.trim()}`, 'Content-Type': 'application/json' }, cache: 'no-store' });
   if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? 'Token recusado pela Gupy.' : `A Gupy respondeu com o código ${response.status}.`);
   return true;
 }
