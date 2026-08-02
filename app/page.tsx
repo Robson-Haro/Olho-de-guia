@@ -458,7 +458,7 @@ export default function HomePage() {
                 {(["serper"] as const).map((provider) => {
                   const configured = talentSourceStatus.find((source) => source.provider === provider)?.configured;
                   const integration = talentIntegration[provider];
-                  const label = "Serper · Google X-Ray";
+                  const label = "Serper · Busca LinkedIn";
                   return (
                     <section className="talentSource" key={provider}>
                       <div className="sourceHeading">
