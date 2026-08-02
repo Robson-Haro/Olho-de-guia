@@ -112,9 +112,12 @@ const nav = [
   { icon: Settings, label: "Configurações", admin: true },
 ];
 
+const candidateLimitOptions = Array.from({ length: 20 }, (_, index) => index + 1);
+
 export default function HomePage() {
   const [active, setActive] = useState("Visão geral"),
     [jobCode, setJobCode] = useState(""),
+    [candidateLimit, setCandidateLimit] = useState(20),
     [loading, setLoading] = useState(false),
     [message, setMessage] = useState("");
   const [importedJob, setImportedJob] = useState<ImportedJob | null>(null);
@@ -324,7 +327,7 @@ export default function HomePage() {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(enrichedSearch),
+        body: JSON.stringify({ ...enrichedSearch, maxCandidates: candidateLimit }),
       });
       const data = await response.json();
       setSearchStrategies(Array.isArray(data.strategies) ? data.strategies : []);
@@ -337,7 +340,7 @@ export default function HomePage() {
           setSearchMessage(`Reavaliando ${foundCandidates.length} perfis pelo motor Python multilíngue...`);
           const rankingData = await requestPythonIntelligence(jobForm, foundCandidates);
           if (Array.isArray(rankingData.candidates)) {
-            rankedCandidates = rankingData.candidates;
+            rankedCandidates = rankingData.candidates.slice(0, candidateLimit);
             setPythonRankingActive(true);
             if (rankingData.jobIntelligence) {
               resolvedJobIntelligence = rankingData.jobIntelligence;
@@ -351,14 +354,15 @@ export default function HomePage() {
       const queriesUsed = Array.isArray(data.providers)
         ? data.providers.reduce((total: number, provider: ProviderSearchStatus) => total + (Number(provider.queries) || 0), 0)
         : 0;
-      setCandidates(rankedCandidates);
+      const limitedCandidates = rankedCandidates.slice(0, candidateLimit);
+      setCandidates(limitedCandidates);
       setSelectedState("");
       setSelectedCity("");
-      setSearchStatus(rankedCandidates.length ? "completed" : "empty");
-      setSearchMessage(rankedCandidates.length
-        ? `Busca concluída: ${rankedCandidates.length} perfil(is) em ${queriesUsed} consulta(s) Serper${pythonPrepared ? ", com cargos equivalentes em três idiomas" : ""}${rankedCandidates[0]?.rankingEngine ? " e ranking Python" : ""}.`
+      setSearchStatus(limitedCandidates.length ? "completed" : "empty");
+      setSearchMessage(limitedCandidates.length
+        ? `Busca concluída: ${limitedCandidates.length} de até ${candidateLimit} perfil(is) em ${queriesUsed} consulta(s) Serper${pythonPrepared ? ", com cargos equivalentes em três idiomas" : ""}${limitedCandidates[0]?.rankingEngine ? " e ranking Python" : ""}.`
         : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
-      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, candidates: rankedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
+      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
       setSearchMessage(error instanceof Error ? error.message : "Erro ao iniciar busca.");
@@ -704,15 +708,29 @@ export default function HomePage() {
                   <button className={jobEntryMode === "gupy" ? "active" : ""} onClick={() => { setJobEntryMode("gupy"); setMessage(""); }}>USAR CÓDIGO DA GUPY</button>
                   <button className={jobEntryMode === "manual" ? "active" : ""} onClick={() => { setJobEntryMode("manual"); prepareManualJob(); }}>INSERIR MANUALMENTE</button>
                 </div>
-                {jobEntryMode === "gupy" && (
-                  <div className="jobInput topJobInput">
+                <div className={`jobInput topJobInput ${jobEntryMode === "manual" ? "manualLimit" : ""}`}>
+                  {jobEntryMode === "gupy" && (
                     <label className="jobCodeField">
                       <span>Número ou código da vaga Gupy *</span>
                       <input value={jobCode} onChange={(e) => setJobCode(e.target.value)} placeholder="Ex.: 12345678" inputMode="numeric" />
                     </label>
+                  )}
+                  <label className="candidateLimitField">
+                    <span>Quantidade de candidatos</span>
+                    <select
+                      value={candidateLimit}
+                      onChange={(event) => setCandidateLimit(Number(event.target.value))}
+                      aria-label="Quantidade máxima de candidatos"
+                    >
+                      {candidateLimitOptions.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {jobEntryMode === "gupy" && (
                     <button onClick={importJob} disabled={loading}>{loading ? "PUXANDO..." : "PUXAR VAGA"} <Search size={17} /></button>
-                  </div>
-                )}
+                  )}
+                </div>
                 <div className="searchForm">
                   <label><span>Título da vaga *</span><input value={jobForm.title} onChange={(e) => setJobForm({ ...jobForm, title: e.target.value })} placeholder="Ex.: Analista de Logística" /></label>
                   <label className="full"><span>Descrição da vaga — revise e altere como desejar *</span><textarea value={jobForm.description} onChange={(e) => setJobForm({ ...jobForm, description: e.target.value })} placeholder="A descrição importada aparecerá aqui, ou você pode escrever manualmente" rows={9} /></label>
@@ -737,7 +755,7 @@ export default function HomePage() {
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
-                  <ShieldCheck size={16} /> 1 busca adaptativa = 3 a 4 consultas Serper · chave protegida no servidor
+                  <ShieldCheck size={16} /> Até {candidateLimit} candidatos por busca · o Eureka interrompe novas consultas ao atingir o limite · chave protegida no servidor
                 </div>
               </article>
               <article className="glass results">

@@ -48,4 +48,5 @@ O Serper fornece título, URL e trecho público indexado pelo Google. Portanto, 
 - Busca de perfis públicos do LinkedIn via Serper
 - Tabela com nome, cargo, empresa, localização, aderência e link clicável
 - Motor Python com cargos equivalentes em três idiomas
+- Quantidade configurável de 1 a 20 candidatos, com interrupção automática da busca ao atingir o limite
 - Download da lista em Excel
