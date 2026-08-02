@@ -9,6 +9,7 @@ type SearchRequest = {
   description?: string;
   keywords?: string[];
   semanticKeywords?: string[];
+  requiredKeywordConcepts?: Array<{ label?: string; aliases?: string[] }>;
   nationwide?: boolean;
   maxCandidates?: number;
 };
@@ -55,6 +56,14 @@ export async function POST(request: Request) {
     const semanticKeywords = Array.isArray(body.semanticKeywords)
       ? body.semanticKeywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 12)
       : [];
+    const requiredKeywordConcepts = Array.isArray(body.requiredKeywordConcepts)
+      ? body.requiredKeywordConcepts.map((concept) => ({
+          label: clean(concept?.label, 100),
+          aliases: Array.isArray(concept?.aliases)
+            ? concept.aliases.map((alias) => clean(alias, 100)).filter(Boolean).slice(0, 16)
+            : [],
+        })).filter((concept) => concept.label && concept.aliases.length).slice(0, 12)
+      : [];
     if (!title || !description || (!nationwide && !city)) {
       return NextResponse.json(
         { error: "Título, descrição e cidade são obrigatórios, exceto em buscas para todo o Brasil." },
@@ -71,6 +80,7 @@ export async function POST(request: Request) {
       description,
       keywords,
       semanticKeywords,
+      requiredKeywordConcepts,
       nationwide,
       maxCandidates,
     });
