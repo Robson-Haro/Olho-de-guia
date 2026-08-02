@@ -357,7 +357,7 @@ function searchQueries(input: TalentSearchInput) {
     .map(naturalSearchTerm)
     .filter(Boolean)
     .join(" ");
-  const candidates: SerperSearch[] = [
+  const naturalCandidates: SerperSearch[] = [
     { query: primaryQuery, page: 1 },
     ...titles.slice(1, 3).map((title) => ({
       query: [linkedinProfileHint, title, ...locations]
@@ -374,17 +374,30 @@ function searchQueries(input: TalentSearchInput) {
       page: 1,
     })),
   ];
-  const seen = new Set<string>();
-  const initial = candidates.filter((item) => {
+  const seenNatural = new Set<string>();
+  const natural = naturalCandidates.filter((item) => {
     const key = `${item.query.toLowerCase()}|${item.page}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seenNatural.has(key)) return false;
+    seenNatural.add(key);
     return true;
   }).slice(0, 3);
 
+  const xrayTitles = titles.slice(0, 2);
+  const xray: SerperSearch[] = [
+    ...xrayTitles.map((title) => ({
+      query: `site:linkedin.com/in ${[title, ...locations].map(naturalSearchTerm).filter(Boolean).join(" ")}`,
+      page: 1,
+    })),
+    {
+      query: `site:linkedin.com/in ${[titles[0], ...locations].map(naturalSearchTerm).filter(Boolean).join(" ")}`,
+      page: 2,
+    },
+  ];
+
   return {
-    initial,
-    fallback: { query: primaryQuery, page: 2 } satisfies SerperSearch,
+    xray,
+    natural,
+    naturalFallback: { query: primaryQuery, page: 2 } satisfies SerperSearch,
   };
 }
 
@@ -406,21 +419,6 @@ async function callSerper(apiKey: string, query: string, num = 10, page = 1) {
 
 async function searchSerper(apiKey: string, input: TalentSearchInput) {
   const plan = searchQueries(input);
-  const initial = await Promise.allSettled(
-    plan.initial.map((item) => callSerper(apiKey, item.query, 10, item.page)),
-  );
-  const successfulPayloads = initial
-    .filter((result): result is PromiseFulfilledResult<Record<string, unknown> | null> => result.status === "fulfilled")
-    .map((result) => result.value);
-
-  if (!successfulPayloads.length) {
-    const firstError = initial.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    throw firstError?.reason instanceof Error
-      ? firstError.reason
-      : new Error(`${PROVIDER.label}: nenhuma estratégia de busca pôde ser executada.`);
-  }
-
-  let queries = successfulPayloads.length;
   const parsePayloads = (payloads: Array<Record<string, unknown> | null>) => payloads.flatMap((payload, payloadIndex) => {
     const organic = Array.isArray(payload?.organic)
       ? payload.organic as Array<Record<string, unknown>>
@@ -429,11 +427,37 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
       .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, input))
       .filter((candidate): candidate is TalentCandidate => Boolean(candidate));
   });
-  let candidates = deduplicate(parsePayloads(successfulPayloads));
 
-  if (candidates.length < 8) {
+  const xrayResults = await Promise.allSettled(
+    plan.xray.map((item) => callSerper(apiKey, item.query, 10, item.page)),
+  );
+  const successfulXray = xrayResults
+    .filter((result): result is PromiseFulfilledResult<Record<string, unknown> | null> => result.status === "fulfilled")
+    .map((result) => result.value);
+  let queries = successfulXray.length;
+  let candidates = deduplicate(parsePayloads(successfulXray));
+
+  if (!successfulXray.length) {
+    const naturalResults = await Promise.allSettled(
+      plan.natural.map((item) => callSerper(apiKey, item.query, 10, item.page)),
+    );
+    const successfulNatural = naturalResults
+      .filter((result): result is PromiseFulfilledResult<Record<string, unknown> | null> => result.status === "fulfilled")
+      .map((result) => result.value);
+    if (!successfulNatural.length) {
+      const firstError = [...xrayResults, ...naturalResults]
+        .find((result): result is PromiseRejectedResult => result.status === "rejected");
+      throw firstError?.reason instanceof Error
+        ? firstError.reason
+        : new Error(`${PROVIDER.label}: nenhuma estratégia de busca pôde ser executada.`);
+    }
+    queries += successfulNatural.length;
+    candidates = deduplicate(parsePayloads(successfulNatural));
+  }
+
+  if (candidates.length < 8 && queries < 4) {
     try {
-      const fallbackPayload = await callSerper(apiKey, plan.fallback.query, 10, plan.fallback.page);
+      const fallbackPayload = await callSerper(apiKey, plan.naturalFallback.query, 10, plan.naturalFallback.page);
       queries += 1;
       candidates = deduplicate([...candidates, ...parsePayloads([fallbackPayload])]);
     } catch {
