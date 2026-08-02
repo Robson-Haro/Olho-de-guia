@@ -30,6 +30,7 @@ export type ProviderSearchStatus = {
   label: string;
   status: "success" | "error";
   count: number;
+  queries: number;
   message: string;
 };
 
@@ -307,27 +308,84 @@ function providerError(response: Response, payload: unknown) {
   return `${PROVIDER.label}: falha ${response.status}${detail ? ` — ${detail}` : ""}.`;
 }
 
-function searchQuery(input: TalentSearchInput) {
+type SerperSearch = {
+  query: string;
+  page: number;
+};
+
+function simplifiedTitle(value: string) {
+  return naturalSearchTerm(value)
+    .replace(/\b(?:j[uú]nior|jr\.?|pleno|s[eê]nior|sr\.?|i{1,3})\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleVariants(value: string) {
+  const title = naturalSearchTerm(value);
+  const variants = [title, simplifiedTitle(title)];
+  const aliases: Array<[RegExp, string]> = [
+    [/administra(?:ç|c)[aã]o de pessoal/i, "departamento pessoal"],
+    [/departamento pessoal/i, "administração de pessoal"],
+    [/recrutamento (?:e|&) sele(?:ç|c)[aã]o/i, "talent acquisition"],
+    [/talent acquisition/i, "recrutamento e seleção"],
+    [/recursos humanos/i, "RH"],
+    [/log[ií]stica/i, "supply chain"],
+    [/supply chain/i, "logística"],
+    [/compras/i, "procurement"],
+    [/procurement/i, "compras"],
+    [/tecnologia da informa(?:ç|c)[aã]o/i, "TI"],
+  ];
+
+  for (const [pattern, replacement] of aliases) {
+    if (pattern.test(title)) variants.push(title.replace(pattern, replacement));
+  }
+  return unique(variants.map(naturalSearchTerm).filter(Boolean));
+}
+
+function searchQueries(input: TalentSearchInput) {
   const locations = input.nationwide
     ? ["Brasil"]
     : [input.city, input.additionalCity].filter(Boolean);
-  const keywords = input.keywords.length
+  const keywords = (input.keywords.length
     ? input.keywords
-    : descriptionTerms(input.description).slice(0, 4);
-
-  return unique([
-    "LinkedIn",
-    "perfil profissional",
-    input.title,
-    ...locations,
-    ...keywords.slice(0, 4),
-  ])
+    : descriptionTerms(input.description)).map(naturalSearchTerm).filter(Boolean);
+  const titles = titleVariants(input.title);
+  const primaryQuery = ["LinkedIn", "perfil profissional", titles[0], ...locations]
     .map(naturalSearchTerm)
     .filter(Boolean)
     .join(" ");
+  const candidates: SerperSearch[] = [
+    { query: primaryQuery, page: 1 },
+    ...titles.slice(1, 3).map((title) => ({
+      query: ["LinkedIn", "perfil profissional", title, ...locations]
+        .map(naturalSearchTerm)
+        .filter(Boolean)
+        .join(" "),
+      page: 1,
+    })),
+    ...keywords.slice(0, 3).map((keyword) => ({
+      query: ["LinkedIn", titles[0], keyword, ...locations]
+        .map(naturalSearchTerm)
+        .filter(Boolean)
+        .join(" "),
+      page: 1,
+    })),
+  ];
+  const seen = new Set<string>();
+  const initial = candidates.filter((item) => {
+    const key = `${item.query.toLowerCase()}|${item.page}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 3);
+
+  return {
+    initial,
+    fallback: { query: primaryQuery, page: 2 } satisfies SerperSearch,
+  };
 }
 
-async function callSerper(apiKey: string, query: string, num = 20) {
+async function callSerper(apiKey: string, query: string, num = 10, page = 1) {
   const response = await fetch("https://google.serper.dev/search", {
     method: "POST",
     headers: {
@@ -335,7 +393,7 @@ async function callSerper(apiKey: string, query: string, num = 20) {
       "Content-Type": "application/json",
       "X-API-KEY": apiKey,
     },
-    body: JSON.stringify({ q: query, gl: "br", hl: "pt-br", num }),
+    body: JSON.stringify({ q: query, gl: "br", hl: "pt-br", num, page }),
     cache: "no-store",
   });
   const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
@@ -344,14 +402,46 @@ async function callSerper(apiKey: string, query: string, num = 20) {
 }
 
 async function searchSerper(apiKey: string, input: TalentSearchInput) {
-  const payload = await callSerper(apiKey, searchQuery(input));
-  const organic = Array.isArray(payload?.organic)
-    ? payload.organic as Array<Record<string, unknown>>
-    : [];
-  return organic
-    .map((result, index) => serperCandidate(result, index, input))
-    .filter((candidate): candidate is TalentCandidate => Boolean(candidate))
-    .sort((a, b) => b.compatibility - a.compatibility);
+  const plan = searchQueries(input);
+  const initial = await Promise.allSettled(
+    plan.initial.map((item) => callSerper(apiKey, item.query, 10, item.page)),
+  );
+  const successfulPayloads = initial
+    .filter((result): result is PromiseFulfilledResult<Record<string, unknown> | null> => result.status === "fulfilled")
+    .map((result) => result.value);
+
+  if (!successfulPayloads.length) {
+    const firstError = initial.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    throw firstError?.reason instanceof Error
+      ? firstError.reason
+      : new Error(`${PROVIDER.label}: nenhuma estratégia de busca pôde ser executada.`);
+  }
+
+  let queries = successfulPayloads.length;
+  const parsePayloads = (payloads: Array<Record<string, unknown> | null>) => payloads.flatMap((payload, payloadIndex) => {
+    const organic = Array.isArray(payload?.organic)
+      ? payload.organic as Array<Record<string, unknown>>
+      : [];
+    return organic
+      .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, input))
+      .filter((candidate): candidate is TalentCandidate => Boolean(candidate));
+  });
+  let candidates = deduplicate(parsePayloads(successfulPayloads));
+
+  if (candidates.length < 8) {
+    try {
+      const fallbackPayload = await callSerper(apiKey, plan.fallback.query, 10, plan.fallback.page);
+      queries += 1;
+      candidates = deduplicate([...candidates, ...parsePayloads([fallbackPayload])]);
+    } catch {
+      // A busca principal continua válida mesmo quando a página adicional falha.
+    }
+  }
+
+  return {
+    candidates: candidates.sort((a, b) => b.compatibility - a.compatibility),
+    queries,
+  };
 }
 
 function deduplicate(candidates: TalentCandidate[]) {
@@ -396,7 +486,8 @@ export async function searchTalentSources(input: TalentSearchInput) {
   }
 
   try {
-    const candidates = deduplicate(await searchSerper(saved.value, input));
+    const result = await searchSerper(saved.value, input);
+    const candidates = result.candidates;
     return {
       candidates,
       providers: [{
@@ -404,7 +495,8 @@ export async function searchTalentSources(input: TalentSearchInput) {
         label: PROVIDER.label,
         status: "success" as const,
         count: candidates.length,
-        message: `${PROVIDER.label} executou 1 consulta e retornou ${candidates.length} perfil(is) público(s) do LinkedIn.`,
+        queries: result.queries,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) adaptativa(s) e retornou ${candidates.length} perfil(is) público(s) do LinkedIn.`,
       }],
       configured: true,
     };
@@ -416,6 +508,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
         label: PROVIDER.label,
         status: "error" as const,
         count: 0,
+        queries: 0,
         message: error instanceof Error ? error.message : `${PROVIDER.label}: erro na busca.`,
       }],
       configured: true,
