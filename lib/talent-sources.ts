@@ -30,6 +30,7 @@ export type ProviderSearchStatus = {
   label: string;
   status: "success" | "error";
   count: number;
+  queriesUsed: number;
   message: string;
 };
 
@@ -124,6 +125,7 @@ function naturalSearchTerm(value: string) {
     .replace(/\b(?:site|inurl|intitle|filetype|cache|related|before|after):\S+/gi, " ")
     .replace(/["“”()[\]{}|]/g, " ")
     .replace(/\b(?:AND|OR)\b/gi, " ")
+    .replace(/[–—_-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -307,24 +309,59 @@ function providerError(response: Response, payload: unknown) {
   return `${PROVIDER.label}: falha ${response.status}${detail ? ` — ${detail}` : ""}.`;
 }
 
-function searchQuery(input: TalentSearchInput) {
-  const locations = input.nationwide
-    ? ["Brasil"]
-    : [input.city, input.additionalCity].filter(Boolean);
-  const keywords = input.keywords.length
-    ? input.keywords
-    : descriptionTerms(input.description).slice(0, 4);
+function titleVariants(value: string) {
+  const expanded = naturalSearchTerm(value)
+    .replace(/\bjr\b/gi, "Junior")
+    .replace(/\bpl\b/gi, "Pleno")
+    .replace(/\bsr\b/gi, "Senior")
+    .replace(/\s+/g, " ")
+    .trim();
+  const core = expanded
+    .replace(/\b(?:junior|pleno|senior|especialista|trainee|estagiario)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const normalized = withoutAccents(core);
+  const aliases: string[] = [];
+  const replacements: Array<[RegExp, string]> = [
+    [/administracao de pessoal/gi, "departamento pessoal"],
+    [/departamento pessoal/gi, "administracao de pessoal"],
+    [/talent acquisition/gi, "recrutamento selecao"],
+    [/recrutamento (?:e )?selecao/gi, "talent acquisition"],
+    [/atracao (?:e )?selecao/gi, "talent acquisition"],
+    [/recursos humanos/gi, "RH"],
+    [/supply chain/gi, "logistica"],
+    [/logistica/gi, "supply chain"],
+  ];
+  replacements.forEach(([pattern, replacement]) => {
+    if (pattern.test(normalized)) aliases.push(normalized.replace(pattern, replacement));
+  });
+  return unique([expanded, core, ...aliases].filter(Boolean));
+}
 
-  return unique([
-    "LinkedIn",
-    "perfil profissional",
-    input.title,
-    ...locations,
-    ...keywords.slice(0, 4),
-  ])
+export function searchQueries(input: TalentSearchInput) {
+  const location = naturalSearchTerm(
+    input.nationwide
+      ? "Brasil"
+      : [input.city, input.additionalCity].filter(Boolean).join(" "),
+  );
+  const variants = titleVariants(input.title);
+  const fullTitle = variants[0] || naturalSearchTerm(input.title);
+  const coreTitle = variants[1] || fullTitle;
+  const aliasTitle = variants[2] || coreTitle;
+  const keywords = (input.keywords.length
+    ? input.keywords
+    : descriptionTerms(input.description))
     .map(naturalSearchTerm)
     .filter(Boolean)
+    .slice(0, 2)
     .join(" ");
+
+  return unique([
+    `br.linkedin.com/in ${fullTitle} ${location}`,
+    `linkedin.com/in ${coreTitle} ${location}`,
+    `LinkedIn ${aliasTitle} ${location} perfil`,
+    `linkedin.com/in ${coreTitle} ${keywords} ${location}`,
+  ].map(naturalSearchTerm).filter(Boolean)).slice(0, 4);
 }
 
 async function callSerper(apiKey: string, query: string, num = 20) {
@@ -344,14 +381,36 @@ async function callSerper(apiKey: string, query: string, num = 20) {
 }
 
 async function searchSerper(apiKey: string, input: TalentSearchInput) {
-  const payload = await callSerper(apiKey, searchQuery(input));
-  const organic = Array.isArray(payload?.organic)
-    ? payload.organic as Array<Record<string, unknown>>
-    : [];
-  return organic
+  const queries = searchQueries(input);
+  const settled = await Promise.allSettled(
+    queries.map((query) => callSerper(apiKey, query)),
+  );
+  const successful = settled.filter(
+    (result): result is PromiseFulfilledResult<Record<string, unknown> | null> => result.status === "fulfilled",
+  );
+  if (!successful.length) {
+    const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    throw failed?.reason instanceof Error
+      ? failed.reason
+      : new Error(`${PROVIDER.label}: todas as consultas falharam.`);
+  }
+  const organic = successful.flatMap(({ value }) => Array.isArray(value?.organic)
+    ? value.organic as Array<Record<string, unknown>>
+    : []);
+  const candidates = organic
+    .flatMap((result) => {
+      const sitelinks = Array.isArray(result.sitelinks)
+        ? result.sitelinks as Array<Record<string, unknown>>
+        : [];
+      return [result, ...sitelinks.map((sitelink) => ({
+        ...sitelink,
+        snippet: plain(sitelink.snippet) || plain(result.snippet),
+      }))];
+    })
     .map((result, index) => serperCandidate(result, index, input))
     .filter((candidate): candidate is TalentCandidate => Boolean(candidate))
     .sort((a, b) => b.compatibility - a.compatibility);
+  return { candidates, queriesUsed: successful.length };
 }
 
 function deduplicate(candidates: TalentCandidate[]) {
@@ -396,7 +455,9 @@ export async function searchTalentSources(input: TalentSearchInput) {
   }
 
   try {
-    const candidates = deduplicate(await searchSerper(saved.value, input));
+    const search = await searchSerper(saved.value, input);
+    const candidates = deduplicate(search.candidates);
+    const queryLabel = search.queriesUsed === 1 ? "consulta" : "consultas";
     return {
       candidates,
       providers: [{
@@ -404,7 +465,8 @@ export async function searchTalentSources(input: TalentSearchInput) {
         label: PROVIDER.label,
         status: "success" as const,
         count: candidates.length,
-        message: `${PROVIDER.label} executou 1 consulta e retornou ${candidates.length} perfil(is) público(s) do LinkedIn.`,
+        queriesUsed: search.queriesUsed,
+        message: `${PROVIDER.label} executou ${search.queriesUsed} ${queryLabel} em camadas e retornou ${candidates.length} perfil(is) público(s) do LinkedIn.`,
       }],
       configured: true,
     };
@@ -416,6 +478,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
         label: PROVIDER.label,
         status: "error" as const,
         count: 0,
+        queriesUsed: 0,
         message: error instanceof Error ? error.message : `${PROVIDER.label}: erro na busca.`,
       }],
       configured: true,
