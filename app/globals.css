@@ -60,3 +60,20 @@ button,input,textarea{font:inherit}
   color: #ffe29a;
 }
 .searchButton.finishedEmpty{background:linear-gradient(180deg,#d19a32,#8c5d0b);box-shadow:inset 0 1px #ffe1a2,0 5px 0 #543500,0 12px 25px #d19a3245}.searchSignal.working{color:#80d9ff;background:#0b4d7055;border:1px solid #46c9ff55}.searchSignal.completed{color:#9df2c9;background:#0d553c55;border:1px solid #47db9b66}.searchSignal.empty{color:#ffe09b;background:#76541655;border:1px solid #e6b84b66}.providerRunList{display:grid;gap:8px}.providerRunList>div{display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:9px;padding:10px;border-radius:9px;font-size:11px}.providerRunList>div.success{color:#9df2c9;background:#0d553c33}.providerRunList>div.error{color:#ffb8bd;background:#70202a33}.providerRunList>div>span:last-child{color:#a8bed0}.resultCandidateList{display:grid;gap:10px;margin-top:20px;max-height:720px;overflow:auto;padding-right:5px}.resultCandidateList>a{display:grid;grid-template-columns:auto 1fr auto;align-items:start;gap:12px;padding:14px;border:1px solid #5acfff2b;border-radius:13px;color:#fff;text-decoration:none;background:#061728aa}.resultCandidateList>a:hover{border-color:#55cfff;background:#0b2a43}.resultCandidateList>a>div{display:grid;gap:4px;min-width:0}.resultCandidateList span,.resultCandidateList small{color:#99b4c8;font-size:12px}.resultCandidateList small{color:#70d8ff}.resultCandidateList p{margin:4px 0 0;color:#8ea8ba;font-size:11px;line-height:1.45}.manualSearches{margin-top:24px;padding-top:18px;border-top:1px solid #ffffff12}.manualSearches .strategyList{margin-top:10px}
+
+/* Tabela de perfis públicos retornados pelo Serper */
+.candidateTableWrap{margin-top:20px;overflow-x:auto;border:1px solid #5acfff2b;border-radius:14px;background:#03101e99}
+.candidateTable{width:100%;min-width:940px;border-collapse:collapse;font-size:11px}
+.candidateTable th{padding:12px;text-align:left;color:#70d8ff;font-size:9px;letter-spacing:1px;text-transform:uppercase;background:#071d31;border-bottom:1px solid #5acfff2b}
+.candidateTable td{padding:14px 12px;vertical-align:top;color:#cbd9e5;border-bottom:1px solid #ffffff0d;line-height:1.4}
+.candidateTable tr:last-child td{border-bottom:0}
+.candidateTable tbody tr:hover{background:#0b2a43aa}
+.candidateTable td:nth-child(1){width:155px}.candidateTable td:nth-child(2){min-width:190px}.candidateTable td:nth-child(6){white-space:nowrap}
+.candidateTable strong{display:block;color:#fff;font-size:12px}
+.compatibilityBadge{display:inline-flex;align-items:center;justify-content:center;min-width:54px;padding:6px 8px;border-radius:20px;font-weight:900;color:#d7e4ed;background:#39546a55;border:1px solid #7894a755}
+.compatibilityBadge.high{color:#9df2c9;background:#0d553c66;border-color:#47db9b77}.compatibilityBadge.medium{color:#ffe09b;background:#76541655;border-color:#e6b84b66}.compatibilityBadge.low{color:#ffb8bd;background:#70202a55;border-color:#e85a6866}
+.matchReason,.candidateSnippet{display:block;margin-top:7px;color:#7897ad;font-size:9px;line-height:1.45}
+.candidateSnippet{max-width:300px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.linkedinButton{display:inline-flex;align-items:center;gap:4px;padding:8px 10px;border:1px solid #57cfff55;border-radius:9px;color:#dff7ff;background:#0b6b9e55;text-decoration:none;font-size:9px;font-weight:900}
+.linkedinButton:hover{color:#fff;border-color:#72dcff;background:#0b83ba}
+.scoreDisclaimer{margin:0;padding:12px 14px;color:#7897ad;font-size:9px;border-top:1px solid #ffffff0d;background:#061728}
