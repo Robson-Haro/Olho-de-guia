@@ -38,8 +38,60 @@ class TalentEngineTests(unittest.TestCase):
         ]
         _, ranked = rank_candidates(self.job, candidates)
         self.assertEqual("Ana", ranked[0]["name"])
-        self.assertGreater(ranked[0]["compatibility"], ranked[1]["compatibility"])
+        self.assertEqual(1, len(ranked))
         self.assertEqual("Python 3 · motor multilíngue", ranked[0]["rankingEngine"])
+
+    def test_process_standardization_expands_titles_in_three_languages(self):
+        job = {
+            **self.job,
+            "title": "Gerente de Padronização de Processos",
+            "description": "Gestão, governança e padronização de processos industriais.",
+            "keywords": ["Couro", "Curtume"],
+        }
+        intelligence = analyze_job(job)
+        normalized = " | ".join(intelligence.equivalent_titles).lower()
+        self.assertEqual("process_excellence", intelligence.family)
+        self.assertIn("process standardization manager", normalized)
+        self.assertIn("gerente de estandarización de procesos", normalized)
+        self.assertEqual(["Couro / Leather", "Curtume / Tannery"], [
+            concept.label for concept in intelligence.required_keywords
+        ])
+
+    def test_required_keywords_remove_profiles_without_public_evidence(self):
+        job = {
+            **self.job,
+            "title": "Gerente de Padronização de Processos",
+            "description": "Padronização, melhoria contínua e processos industriais.",
+            "keywords": ["Couro", "Curtume"],
+        }
+        candidates = [
+            {
+                "id": "1", "name": "Ana", "title": "Process Standardization Manager",
+                "summary": "Process governance and operational excellence in the leather and tannery industry",
+                "city": "Franca", "state": "SP", "profileUrl": "https://www.linkedin.com/in/ana",
+            },
+            {
+                "id": "2", "name": "Bruno", "title": "Gerente de Processos",
+                "summary": "Padronização de processos no setor bancário",
+                "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/bruno",
+            },
+            {
+                "id": "3", "name": "Carlos", "title": "Gerente de Procesos",
+                "summary": "Excelencia operacional en curtiembre y curtido de cuero",
+                "city": "Buenos Aires", "state": "", "profileUrl": "https://www.linkedin.com/in/carlos",
+            },
+        ]
+        _, ranked = rank_candidates(job, candidates)
+        self.assertEqual(["Ana", "Carlos"], sorted(candidate["name"] for candidate in ranked))
+        self.assertTrue(all(not candidate["missingRequiredKeywords"] for candidate in ranked))
+        self.assertTrue(all(len(candidate["matchedRequiredKeywords"]) == 2 for candidate in ranked))
+
+    def test_composite_keyword_field_becomes_two_required_concepts(self):
+        job = {**self.job, "keywords": ["Couro e Curtume"]}
+        intelligence = analyze_job(job)
+        self.assertEqual(["Couro / Leather", "Curtume / Tannery"], [
+            concept.label for concept in intelligence.required_keywords
+        ])
 
     def test_sensitive_traits_never_become_ranking_skills(self):
         job = {**self.job, "keywords": ["Excel", "idade", "PcD", "gênero"]}
@@ -64,7 +116,7 @@ class TalentEngineTests(unittest.TestCase):
 
     def test_export_neutralizes_excel_formulas(self):
         _, ranked = rank_candidates(self.job, [{
-            "id": "1", "name": "=HYPERLINK(\"bad\")", "title": "Payroll Analyst", "summary": "Payroll",
+            "id": "1", "name": "=HYPERLINK(\"bad\")", "title": "Payroll Analyst", "summary": "Payroll and Excel",
             "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/safe",
         }])
         binary = create_candidate_workbook(self.job, ranked)
