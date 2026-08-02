@@ -59,6 +59,8 @@ type Candidate = {
   rank?: number;
   matchedSkills?: string[];
   missingSkills?: string[];
+  matchedRequiredKeywords?: string[];
+  missingRequiredKeywords?: string[];
   titleAlignment?: string;
   evidenceConfidence?: number;
   evidenceLabel?: string;
@@ -71,6 +73,7 @@ type JobIntelligence = {
   level?: string | null;
   equivalentTitles: string[];
   skills: string[];
+  requiredKeywords?: Array<{ label: string; aliases: string[] }>;
   languages: string[];
 };
 
@@ -306,6 +309,7 @@ export default function HomePage() {
       let enrichedSearch = { ...jobForm } as typeof jobForm & {
         titleVariants?: string[];
         semanticKeywords?: string[];
+        requiredKeywordConcepts?: Array<{ label: string; aliases: string[] }>;
       };
       let pythonPrepared = false;
       let resolvedJobIntelligence: JobIntelligence | null = null;
@@ -318,6 +322,7 @@ export default function HomePage() {
           ...jobForm,
           titleVariants: intelligence?.equivalentTitles || [],
           semanticKeywords: intelligence?.skills || [],
+          requiredKeywordConcepts: intelligence?.requiredKeywords || [],
         };
         pythonPrepared = true;
         setSearchMessage("Cargos equivalentes identificados. Consultando perfis públicos do LinkedIn...");
@@ -355,13 +360,17 @@ export default function HomePage() {
         ? data.providers.reduce((total: number, provider: ProviderSearchStatus) => total + (Number(provider.queries) || 0), 0)
         : 0;
       const limitedCandidates = rankedCandidates.slice(0, candidateLimit);
+      const requiredKeywordCount = resolvedJobIntelligence?.requiredKeywords?.length
+        ?? jobForm.keywords.filter((keyword) => keyword.trim()).length;
       setCandidates(limitedCandidates);
       setSelectedState("");
       setSelectedCity("");
       setSearchStatus(limitedCandidates.length ? "completed" : "empty");
       setSearchMessage(limitedCandidates.length
-        ? `Busca concluída: ${limitedCandidates.length} de até ${candidateLimit} perfil(is) em ${queriesUsed} consulta(s) Serper${pythonPrepared ? ", com cargos equivalentes em três idiomas" : ""}${limitedCandidates[0]?.rankingEngine ? " e ranking Python" : ""}.`
-        : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
+        ? `Busca concluída: ${limitedCandidates.length} de até ${candidateLimit} perfil(is) em ${queriesUsed} consulta(s) Serper${requiredKeywordCount ? `, com ${requiredKeywordCount} palavra(s)-chave obrigatória(s) validada(s)` : ""}${pythonPrepared ? ", cargos equivalentes em três idiomas" : ""}${limitedCandidates[0]?.rankingEngine ? " e ranking Python" : ""}.`
+        : requiredKeywordCount
+          ? `A busca executou ${queriesUsed} consulta(s), mas nenhum perfil apresentou evidência pública de todas as palavras-chave obrigatórias. Revise os termos ou amplie a localização.`
+          : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
       localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
@@ -734,8 +743,9 @@ export default function HomePage() {
                 <div className="searchForm">
                   <label><span>Título da vaga *</span><input value={jobForm.title} onChange={(e) => setJobForm({ ...jobForm, title: e.target.value })} placeholder="Ex.: Analista de Logística" /></label>
                   <label className="full"><span>Descrição da vaga — revise e altere como desejar *</span><textarea value={jobForm.description} onChange={(e) => setJobForm({ ...jobForm, description: e.target.value })} placeholder="A descrição importada aparecerá aqui, ou você pode escrever manualmente" rows={9} /></label>
-                  <fieldset className="full keywordFields"><legend>Palavras-chave para a busca</legend>
+                  <fieldset className="full keywordFields"><legend>Palavras-chave obrigatórias para a busca</legend>
                     {jobForm.keywords.map((keyword, index) => <input key={index} value={keyword} onChange={(e) => updateKeyword(index, e.target.value)} placeholder={`Palavra-chave ${index + 1}`} />)}
+                    <small className="keywordHint">Cada campo preenchido funciona como critério obrigatório. O Eureka aceita equivalentes em português, inglês e espanhol.</small>
                   </fieldset>
                   <label><span>Cidade da vaga *</span><input value={jobForm.city} onChange={(e) => setJobForm({ ...jobForm, city: e.target.value })} placeholder="Cidade importada ou principal" /></label>
                   <label><span>Acrescentar outra cidade</span><input value={jobForm.additionalCity} onChange={(e) => setJobForm({ ...jobForm, additionalCity: e.target.value })} placeholder="Opcional: região ou cidade adicional" /></label>
@@ -763,7 +773,7 @@ export default function HomePage() {
                   <div>
                     <span className="kicker">RADAR DE TALENTOS</span>
                     <h3>Perfis públicos encontrados</h3>
-                    {jobIntelligence && <p className="intelligenceSummary">Família identificada: <strong>{jobIntelligence.familyLabel}</strong> · {jobIntelligence.equivalentTitles.length} cargo(s) equivalente(s) · PT/EN/ES</p>}
+                    {jobIntelligence && <p className="intelligenceSummary">Família identificada: <strong>{jobIntelligence.familyLabel}</strong> · {jobIntelligence.equivalentTitles.length} cargo(s) equivalente(s){jobIntelligence.requiredKeywords?.length ? ` · ${jobIntelligence.requiredKeywords.length} palavra(s)-chave obrigatória(s)` : ""} · PT/EN/ES</p>}
                   </div>
                   {candidates.length > 0 && <div className="resultActions">
                     {pythonRankingActive && <span className="pythonBadge">PYTHON · RANKING ATIVO</span>}
