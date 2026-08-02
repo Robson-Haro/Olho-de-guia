@@ -62,6 +62,7 @@ type ProviderSearchStatus = {
   label: string;
   status: "success" | "error";
   count: number;
+  queries: number;
   message: string;
 };
 
@@ -272,13 +273,16 @@ export default function HomePage() {
       setProviderResults(Array.isArray(data.providers) ? data.providers : []);
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
       const foundCandidates = Array.isArray(data.candidates) ? data.candidates : [];
+      const queriesUsed = Array.isArray(data.providers)
+        ? data.providers.reduce((total: number, provider: ProviderSearchStatus) => total + (Number(provider.queries) || 0), 0)
+        : 0;
       setCandidates(foundCandidates);
       setSelectedState("");
       setSelectedCity("");
       setSearchStatus(foundCandidates.length ? "completed" : "empty");
       setSearchMessage(foundCandidates.length
-        ? `Busca concluída: ${foundCandidates.length} perfil(is) público(s) do LinkedIn encontrado(s) em 1 consulta Serper.`
-        : "A consulta foi concluída, mas nenhum perfil público do LinkedIn correspondeu aos filtros. Tente ampliar o cargo, as palavras-chave ou a localização.");
+        ? `Busca concluída: ${foundCandidates.length} perfil(is) público(s) do LinkedIn encontrado(s) em ${queriesUsed} consulta(s) adaptativa(s) do Serper.`
+        : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
       localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, candidates: foundCandidates, providers: data.providers, createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
@@ -490,7 +494,7 @@ export default function HomePage() {
                         </div>
                       </label>
                       <small className="creditNote">
-                        Cada busca ou teste usa 1 consulta do Serper. A conta nova inclui 2.500 consultas gratuitas, sem cartão. Nenhum enriquecimento é realizado.
+                        Cada teste usa 1 consulta. Cada busca adaptativa usa de 3 a 4 consultas do Serper para ampliar a cobertura. A conta nova inclui 2.500 consultas gratuitas, sem cartão. Nenhum enriquecimento é realizado.
                       </small>
                       <a className="providerHelpLink" href="https://serper.dev/" target="_blank" rel="noreferrer">
                         Criar conta ou consultar saldo no Serper
@@ -629,7 +633,7 @@ export default function HomePage() {
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
-                  <ShieldCheck size={16} /> 1 busca = 1 consulta Serper · chave protegida no servidor
+                  <ShieldCheck size={16} /> 1 busca adaptativa = 3 a 4 consultas Serper · chave protegida no servidor
                 </div>
               </article>
               <article className="glass results">
