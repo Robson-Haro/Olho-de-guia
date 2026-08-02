@@ -134,6 +134,10 @@ const REQUIRED_KEYWORD_EQUIVALENTS: Record<string, string[]> = {
   ],
 };
 
+const REQUIRED_KEYWORD_IMPLICATIONS: Record<string, string[]> = {
+  "Curtume / Tannery": ["Couro / Leather"],
+};
+
 function plain(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -276,10 +280,14 @@ function requiredKeywordEvidence(
   supplied: RequiredKeywordConcept[] = [],
 ) {
   const concepts = requiredKeywordConcepts(keywords, supplied);
-  const matched = concepts
+  const directlyMatched = concepts
     .filter((concept) => concept.aliases.some((alias) => includesNormalized(candidateText, alias)))
     .map((concept) => concept.label);
-  const matchedSet = new Set(matched);
+  const matchedSet = new Set(directlyMatched);
+  for (const label of directlyMatched) {
+    for (const implied of REQUIRED_KEYWORD_IMPLICATIONS[label] || []) matchedSet.add(implied);
+  }
+  const matched = concepts.filter((concept) => matchedSet.has(concept.label)).map((concept) => concept.label);
   return {
     concepts,
     matched,
@@ -446,7 +454,10 @@ function searchQueries(input: TalentSearchInput) {
     ? ["Brasil"]
     : [input.city, input.additionalCity].filter(Boolean);
   const requiredConcepts = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts);
-  const requiredNaturalTerms = requiredConcepts
+  const queryConcepts = requiredConcepts.filter((concept) => !requiredConcepts.some((possibleSource) =>
+    (REQUIRED_KEYWORD_IMPLICATIONS[possibleSource.label] || []).includes(concept.label),
+  ));
+  const requiredNaturalTerms = queryConcepts
     .map((concept) => naturalSearchTerm(concept.aliases[0] || concept.label))
     .filter(Boolean);
   const titles = titleVariants(input.title, input.titleVariants);
@@ -472,17 +483,17 @@ function searchQueries(input: TalentSearchInput) {
     return true;
   }).slice(0, 4);
 
-  const xrayKeywordGroups = requiredConcepts.map((concept) => {
-    const aliases = concept.aliases.slice(0, 5).map((alias) => `"${naturalSearchTerm(alias)}"`).filter((alias) => alias !== '""');
+  const xrayKeywordGroups = queryConcepts.map((concept) => {
+    const aliases = concept.aliases.slice(0, 10).map((alias) => `"${naturalSearchTerm(alias)}"`).filter((alias) => alias !== '""');
     return aliases.length > 1 ? `(${aliases.join(" OR ")})` : aliases[0] || "";
   }).filter(Boolean);
   const xray: SerperSearch[] = titles.slice(0, 4).map((title) => ({
-    query: `site:linkedin.com/in "${naturalSearchTerm(title)}" ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
+    query: `site:linkedin.com/in ${naturalSearchTerm(title)} ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
     page: 1,
   }));
   if (xray.length < 4) {
     xray.push({
-      query: `site:linkedin.com/in "${naturalSearchTerm(titles[0])}" ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
+      query: `site:linkedin.com/in ${naturalSearchTerm(titles[0])} ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
       page: 2,
     });
   }

@@ -80,9 +80,19 @@ class TalentEngineTests(unittest.TestCase):
                 "summary": "Excelencia operacional en curtiembre y curtido de cuero",
                 "city": "Buenos Aires", "state": "", "profileUrl": "https://www.linkedin.com/in/carlos",
             },
+            {
+                "id": "4", "name": "Diana", "title": "Continuous Improvement Manager",
+                "summary": "Lean transformation and process governance for tannery operations",
+                "city": "Franca", "state": "SP", "profileUrl": "https://www.linkedin.com/in/diana",
+            },
+            {
+                "id": "5", "name": "Eduardo", "title": "Gerente Comercial",
+                "summary": "Vendas de artigos de couro no varejo",
+                "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/eduardo",
+            },
         ]
         _, ranked = rank_candidates(job, candidates)
-        self.assertEqual(["Ana", "Carlos"], sorted(candidate["name"] for candidate in ranked))
+        self.assertEqual(["Ana", "Carlos", "Diana"], sorted(candidate["name"] for candidate in ranked))
         self.assertTrue(all(not candidate["missingRequiredKeywords"] for candidate in ranked))
         self.assertTrue(all(len(candidate["matchedRequiredKeywords"]) == 2 for candidate in ranked))
 
