@@ -61,7 +61,7 @@ export async function POST(request: Request) {
 
     if (!result.configured) {
       return NextResponse.json({
-        error: "Nenhuma fonte automática de talentos está configurada. Abra Configurações e conecte Apollo.io ou SerpApi.",
+        error: "O Serper ainda não está configurado. Abra Configurações, cole a chave da API e ative a conexão.",
         code: "TALENT_SOURCE_NOT_CONFIGURED",
         completed: false,
         candidates: [],

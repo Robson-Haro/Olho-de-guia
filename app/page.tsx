@@ -53,10 +53,12 @@ type Candidate = {
   company?: string;
   source?: string;
   summary?: string;
+  compatibility: number;
+  matchReason: string;
 };
 
 type ProviderSearchStatus = {
-  provider: "apollo" | "serpapi";
+  provider: "serper";
   label: string;
   status: "success" | "error";
   count: number;
@@ -64,7 +66,7 @@ type ProviderSearchStatus = {
 };
 
 type TalentSourceStatus = {
-  provider: "apollo" | "serpapi";
+  provider: "serper";
   label: string;
   configured: boolean;
   updatedAt: string | null;
@@ -120,16 +122,16 @@ export default function HomePage() {
       "idle" | "working" | "success" | "error"
     >("idle"),
     [configMessage, setConfigMessage] = useState("");
-  const [talentKeys, setTalentKeys] = useState({ apollo: "", serpapi: "" });
-  const [showTalentKeys, setShowTalentKeys] = useState({ apollo: false, serpapi: false });
+  const [talentKeys, setTalentKeys] = useState({ serper: "" });
+  const [showTalentKeys, setShowTalentKeys] = useState({ serper: false });
   const [talentSourceStatus, setTalentSourceStatus] = useState<TalentSourceStatus[]>([]);
-  const [talentIntegration, setTalentIntegration] = useState<Record<"apollo" | "serpapi", IntegrationState>>({
-    apollo: { status: "idle", message: "" },
-    serpapi: { status: "idle", message: "" },
+  const [talentIntegration, setTalentIntegration] = useState<Record<"serper", IntegrationState>>({
+    serper: { status: "idle", message: "" },
   });
+  const highAdherenceCount = candidates.filter((candidate) => candidate.compatibility >= 70).length;
   const stats = [
     { label: "Perfis mapeados", value: String(candidates.length), icon: UsersRound },
-    { label: "Alta aderência", value: "0", icon: Target },
+    { label: "Alta aderência", value: String(highAdherenceCount), icon: Target },
     { label: "Shortlists ativas", value: "0", icon: ListChecks },
     { label: "Tempo economizado", value: "0h", icon: Zap },
   ];
@@ -209,7 +211,7 @@ export default function HomePage() {
       );
     }
   }
-  async function configureTalentSource(provider: "apollo" | "serpapi", action: "test" | "save") {
+  async function configureTalentSource(provider: "serper", action: "test" | "save") {
     const apiKey = talentKeys[provider].trim();
     if (!apiKey) {
       setTalentIntegration((current) => ({ ...current, [provider]: { status: "error", message: "Cole a chave da API para continuar." } }));
@@ -256,7 +258,7 @@ export default function HomePage() {
       return;
     }
     setSearchStatus("working");
-    setSearchMessage("Consultando fontes reais de profissionais...");
+    setSearchMessage("Consultando o Google via Serper e localizando perfis públicos do LinkedIn...");
     setProviderResults([]);
     setCandidates([]);
     try {
@@ -275,8 +277,8 @@ export default function HomePage() {
       setSelectedCity("");
       setSearchStatus(foundCandidates.length ? "completed" : "empty");
       setSearchMessage(foundCandidates.length
-        ? `Busca finalizada de verdade: ${foundCandidates.length} perfil(is) retornado(s) pelas fontes conectadas.`
-        : "Busca finalizada nas fontes conectadas, mas nenhum perfil correspondeu aos filtros. Tente ampliar o cargo, as palavras-chave ou a localização.");
+        ? `Busca concluída: ${foundCandidates.length} perfil(is) público(s) do LinkedIn encontrado(s) em 1 consulta Serper.`
+        : "A consulta foi concluída, mas nenhum perfil público do LinkedIn correspondeu aos filtros. Tente ampliar o cargo, as palavras-chave ou a localização.");
       localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, candidates: foundCandidates, providers: data.providers, createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
@@ -441,20 +443,20 @@ export default function HomePage() {
                 <Database size={30} />
               </div>
               <p>
-                Conecte ao menos uma fonte. As chaves são criptografadas e usadas
-                apenas no servidor para retornar profissionais reais ao Eureka.
+                Conecte o Serper para localizar perfis públicos do LinkedIn pelo
+                Google. A chave é criptografada e usada apenas no servidor.
               </p>
               <div className="talentSourceList">
-                {(["apollo", "serpapi"] as const).map((provider) => {
+                {(["serper"] as const).map((provider) => {
                   const configured = talentSourceStatus.find((source) => source.provider === provider)?.configured;
                   const integration = talentIntegration[provider];
-                  const label = provider === "apollo" ? "Apollo.io" : "SerpApi · Google X-Ray";
+                  const label = "Serper · Google X-Ray";
                   return (
                     <section className="talentSource" key={provider}>
                       <div className="sourceHeading">
                         <div>
                           <strong>{label}</strong>
-                          <span>{provider === "apollo" ? "Cargo, palavras-chave, cidade e Brasil inteiro" : "Perfis públicos indexados pelo Google"}</span>
+                          <span>Perfis públicos do LinkedIn indexados pelo Google</span>
                         </div>
                         <span className={`sourceBadge ${configured ? "connected" : ""}`}>
                           {configured ? "CONECTADA" : "NÃO CONFIGURADA"}
@@ -479,9 +481,12 @@ export default function HomePage() {
                           </button>
                         </div>
                       </label>
-                      {provider === "apollo" && (
-                        <small className="creditNote">A pesquisa inicial não consome créditos; carregar até 10 perfis completos pode consumir créditos de enriquecimento do seu plano.</small>
-                      )}
+                      <small className="creditNote">
+                        Cada busca ou teste usa 1 consulta do Serper. A conta nova inclui 2.500 consultas gratuitas, sem cartão. Nenhum enriquecimento é realizado.
+                      </small>
+                      <a className="providerHelpLink" href="https://serper.dev/" target="_blank" rel="noreferrer">
+                        Criar conta ou consultar saldo no Serper
+                      </a>
                       {integration.message && (
                         <div className={`configNotice ${integration.status}`}>
                           {integration.status === "success" ? <CheckCircle2 size={18} /> : <ShieldCheck size={18} />}
@@ -505,7 +510,7 @@ export default function HomePage() {
               <h3>Como funciona</h3>
               <ol>
                 <li>
-                  <b>Você</b> cadastra o token nesta área protegida.
+                  <b>Você</b> cadastra a chave do Serper nesta área protegida.
                 </li>
                 <li>
                   <b>O sistema</b> testa a conexão antes de salvar.
@@ -514,7 +519,7 @@ export default function HomePage() {
                   <b>As analistas</b> inserem somente o código da vaga.
                 </li>
                 <li>
-                  <b>O agente</b> importa a vaga da Gupy e consulta as fontes de talentos.
+                  <b>O agente</b> importa a vaga da Gupy, monta a busca X-Ray e consulta perfis públicos do LinkedIn.
                 </li>
               </ol>
               <div className="privateBadge">
@@ -616,32 +621,58 @@ export default function HomePage() {
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
-                  <ShieldCheck size={16} /> Token protegido e visível apenas ao
-                  administrador
+                  <ShieldCheck size={16} /> 1 busca = 1 consulta Serper · chave protegida no servidor
                 </div>
               </article>
               <article className="glass results">
                 <div className="sectionTitle">
                   <div>
                     <span className="kicker">RADAR DE TALENTOS</span>
-                    <h3>Melhores aderências</h3>
+                    <h3>Perfis públicos encontrados</h3>
                   </div>
                   <button className="link">
                     Ver todos <ChevronRight size={16} />
                   </button>
                 </div>
-                {candidates.length > 0 ? <div className="resultCandidateList">
-                  {candidates.map((candidate) => <a key={candidate.id} href={candidate.profileUrl || "#"} target={candidate.profileUrl ? "_blank" : undefined} rel="noreferrer">
-                    <CircleUserRound size={34} />
-                    <div>
-                      <strong>{candidate.name}</strong>
-                      <span>{candidate.title}{candidate.company ? ` · ${candidate.company}` : ""}</span>
-                      <small>{[candidate.city, candidate.state].filter(Boolean).join("/") || "Localidade não informada"} · {candidate.source}</small>
-                      {candidate.summary && <p>{candidate.summary}</p>}
-                    </div>
-                    <ChevronRight size={20} />
-                  </a>)}
-                </div> : <div className="emptyState"><UsersRound size={38} /><strong>{searchStatus === "working" ? "Busca em andamento" : searchStatus === "empty" ? "Busca finalizada sem perfis" : searchStatus === "error" ? "A busca automática não foi executada" : "Nenhuma busca ativada"}</strong><span>{searchStatus === "error" ? "Confira o aviso e conecte uma fonte de talentos em Configurações." : "Preencha a vaga e consulte as fontes conectadas."}</span></div>}
+                {candidates.length > 0 ? <div className="candidateTableWrap">
+                  <table className="candidateTable">
+                    <thead>
+                      <tr>
+                        <th>Aderência</th>
+                        <th>Nome</th>
+                        <th>Cargo atual</th>
+                        <th>Empresa</th>
+                        <th>Localização</th>
+                        <th>LinkedIn</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {candidates.map((candidate) => (
+                        <tr key={candidate.id}>
+                          <td>
+                            <span className={`compatibilityBadge ${candidate.compatibility >= 70 ? "high" : candidate.compatibility >= 45 ? "medium" : "low"}`}>
+                              {candidate.compatibility}%
+                            </span>
+                            <small className="matchReason">{candidate.matchReason}</small>
+                          </td>
+                          <td>
+                            <strong>{candidate.name}</strong>
+                            {candidate.summary && <small className="candidateSnippet">{candidate.summary}</small>}
+                          </td>
+                          <td>{candidate.title || "Não identificado"}</td>
+                          <td>{candidate.company || "Não identificada"}</td>
+                          <td>{[candidate.city, candidate.state].filter(Boolean).join("/") || "Não identificada"}</td>
+                          <td>
+                            <a className="linkedinButton" href={candidate.profileUrl} target="_blank" rel="noreferrer">
+                              ABRIR PERFIL <ChevronRight size={15} />
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="scoreDisclaimer">A aderência é uma estimativa baseada apenas no título e no trecho público indexado pelo Google. Confirme o perfil completo no LinkedIn antes de decidir.</p>
+                </div> : <div className="emptyState"><UsersRound size={38} /><strong>{searchStatus === "working" ? "Busca em andamento" : searchStatus === "empty" ? "Busca finalizada sem perfis" : searchStatus === "error" ? "A busca automática não foi executada" : "Nenhuma busca ativada"}</strong><span>{searchStatus === "error" ? "Confira o aviso e conecte o Serper em Configurações." : "Preencha a vaga e consulte os perfis públicos pelo Serper."}</span></div>}
                 {searchStrategies.length > 0 && <div className="manualSearches">
                   <span className="kicker">PESQUISA MANUAL COMPLEMENTAR</span>
                   <div className="strategyList">
