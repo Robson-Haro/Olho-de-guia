@@ -8,6 +8,7 @@ import {
   CircleUserRound,
   Crosshair,
   Database,
+  Download,
   Eye,
   EyeOff,
   Home,
@@ -55,6 +56,22 @@ type Candidate = {
   summary?: string;
   compatibility: number;
   matchReason: string;
+  rank?: number;
+  matchedSkills?: string[];
+  missingSkills?: string[];
+  titleAlignment?: string;
+  evidenceConfidence?: number;
+  evidenceLabel?: string;
+  rankingEngine?: string;
+};
+
+type JobIntelligence = {
+  family?: string | null;
+  familyLabel: string;
+  level?: string | null;
+  equivalentTitles: string[];
+  skills: string[];
+  languages: string[];
 };
 
 type ProviderSearchStatus = {
@@ -114,6 +131,10 @@ export default function HomePage() {
   const [searchMessage, setSearchMessage] = useState("");
   const [searchStrategies, setSearchStrategies] = useState<SearchStrategy[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [jobIntelligence, setJobIntelligence] = useState<JobIntelligence | null>(null);
+  const [pythonRankingActive, setPythonRankingActive] = useState(false);
+  const [exportStatus, setExportStatus] = useState<"idle" | "working" | "error">("idle");
+  const [exportMessage, setExportMessage] = useState("");
   const [providerResults, setProviderResults] = useState<ProviderSearchStatus[]>([]);
   const [selectedState, setSelectedState] = useState("");
   const [selectedCity, setSelectedCity] = useState("");
@@ -251,7 +272,20 @@ export default function HomePage() {
     setSearchStatus("idle");
     setSearchStrategies([]);
     setProviderResults([]);
+    setJobIntelligence(null);
+    setPythonRankingActive(false);
   }
+
+  async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = []) {
+    const response = await fetch("/svc/intelligence/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job, candidates: profiles }),
+    });
+    if (!response.ok) throw new Error("Motor Python temporariamente indisponível.");
+    return response.json();
+  }
+
   async function startSearch() {
     if (!jobForm.title.trim() || !jobForm.description.trim() || (!jobForm.nationwide && !jobForm.city.trim())) {
       setSearchStatus("error");
@@ -259,34 +293,104 @@ export default function HomePage() {
       return;
     }
     setSearchStatus("working");
-    setSearchMessage("Consultando o Google via Serper e localizando perfis públicos do LinkedIn...");
+    setSearchMessage("Interpretando a vaga em português, inglês e espanhol...");
     setProviderResults([]);
     setCandidates([]);
+    setJobIntelligence(null);
+    setPythonRankingActive(false);
+    setExportMessage("");
     try {
+      let enrichedSearch = { ...jobForm } as typeof jobForm & {
+        titleVariants?: string[];
+        semanticKeywords?: string[];
+      };
+      let pythonPrepared = false;
+      let resolvedJobIntelligence: JobIntelligence | null = null;
+      try {
+        const intelligenceData = await requestPythonIntelligence(jobForm);
+        const intelligence = intelligenceData.jobIntelligence as JobIntelligence;
+        resolvedJobIntelligence = intelligence;
+        setJobIntelligence(intelligence);
+        enrichedSearch = {
+          ...jobForm,
+          titleVariants: intelligence?.equivalentTitles || [],
+          semanticKeywords: intelligence?.skills || [],
+        };
+        pythonPrepared = true;
+        setSearchMessage("Cargos equivalentes identificados. Consultando perfis públicos do LinkedIn...");
+      } catch {
+        // A busca permanece disponível com o mecanismo TypeScript anterior.
+      }
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(jobForm),
+        body: JSON.stringify(enrichedSearch),
       });
       const data = await response.json();
       setSearchStrategies(Array.isArray(data.strategies) ? data.strategies : []);
       setProviderResults(Array.isArray(data.providers) ? data.providers : []);
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
-      const foundCandidates = Array.isArray(data.candidates) ? data.candidates : [];
+      const foundCandidates = Array.isArray(data.candidates) ? data.candidates as Candidate[] : [];
+      let rankedCandidates = foundCandidates;
+      if (foundCandidates.length && pythonPrepared) {
+        try {
+          setSearchMessage(`Reavaliando ${foundCandidates.length} perfis pelo motor Python multilíngue...`);
+          const rankingData = await requestPythonIntelligence(jobForm, foundCandidates);
+          if (Array.isArray(rankingData.candidates)) {
+            rankedCandidates = rankingData.candidates;
+            setPythonRankingActive(true);
+            if (rankingData.jobIntelligence) {
+              resolvedJobIntelligence = rankingData.jobIntelligence;
+              setJobIntelligence(rankingData.jobIntelligence);
+            }
+          }
+        } catch {
+          setPythonRankingActive(false);
+        }
+      }
       const queriesUsed = Array.isArray(data.providers)
         ? data.providers.reduce((total: number, provider: ProviderSearchStatus) => total + (Number(provider.queries) || 0), 0)
         : 0;
-      setCandidates(foundCandidates);
+      setCandidates(rankedCandidates);
       setSelectedState("");
       setSelectedCity("");
-      setSearchStatus(foundCandidates.length ? "completed" : "empty");
-      setSearchMessage(foundCandidates.length
-        ? `Busca concluída: ${foundCandidates.length} perfil(is) público(s) do LinkedIn encontrado(s) em ${queriesUsed} consulta(s) adaptativa(s) do Serper.`
+      setSearchStatus(rankedCandidates.length ? "completed" : "empty");
+      setSearchMessage(rankedCandidates.length
+        ? `Busca concluída: ${rankedCandidates.length} perfil(is) em ${queriesUsed} consulta(s) Serper${pythonPrepared ? ", com cargos equivalentes em três idiomas" : ""}${rankedCandidates[0]?.rankingEngine ? " e ranking Python" : ""}.`
         : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
-      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, candidates: foundCandidates, providers: data.providers, createdAt: new Date().toISOString() }));
+      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, strategies: data.strategies, candidates: rankedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
       setSearchMessage(error instanceof Error ? error.message : "Erro ao iniciar busca.");
+    }
+  }
+
+  async function downloadCandidateSpreadsheet() {
+    if (!candidates.length) return;
+    setExportStatus("working");
+    setExportMessage("");
+    try {
+      const response = await fetch("/svc/intelligence/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job: jobForm, candidates }),
+      });
+      if (!response.ok) throw new Error("Não foi possível gerar a planilha Excel.");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      const safeTitle = jobForm.title.replace(/[^a-zA-Z0-9À-ÿ_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "candidatos";
+      anchor.href = url;
+      anchor.download = `Eureka-${safeTitle}.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setExportStatus("idle");
+      setExportMessage(`Planilha com ${candidates.length} candidato(s) baixada com sucesso.`);
+    } catch (error) {
+      setExportStatus("error");
+      setExportMessage(error instanceof Error ? error.message : "Falha ao baixar a planilha.");
     }
   }
   const stateTotals = candidates.reduce<Record<string, number>>((totals, candidate) => {
@@ -641,11 +745,16 @@ export default function HomePage() {
                   <div>
                     <span className="kicker">RADAR DE TALENTOS</span>
                     <h3>Perfis públicos encontrados</h3>
+                    {jobIntelligence && <p className="intelligenceSummary">Família identificada: <strong>{jobIntelligence.familyLabel}</strong> · {jobIntelligence.equivalentTitles.length} cargo(s) equivalente(s) · PT/EN/ES</p>}
                   </div>
-                  <button className="link">
-                    Ver todos <ChevronRight size={16} />
-                  </button>
+                  {candidates.length > 0 && <div className="resultActions">
+                    {pythonRankingActive && <span className="pythonBadge">PYTHON · RANKING ATIVO</span>}
+                    <button className="exportButton" onClick={downloadCandidateSpreadsheet} disabled={exportStatus === "working"}>
+                      <Download size={17} /> {exportStatus === "working" ? "GERANDO EXCEL..." : "BAIXAR PLANILHA"}
+                    </button>
+                  </div>}
                 </div>
+                {exportMessage && <div className={`exportNotice ${exportStatus === "error" ? "error" : "success"}`}>{exportMessage}</div>}
                 {candidates.length > 0 ? <div className="candidateTableWrap">
                   <table className="candidateTable">
                     <thead>
@@ -666,6 +775,7 @@ export default function HomePage() {
                               {candidate.compatibility}%
                             </span>
                             <small className="matchReason">{candidate.matchReason}</small>
+                            {candidate.evidenceLabel && <small className="evidenceConfidence">Confiança das evidências: {candidate.evidenceLabel}</small>}
                           </td>
                           <td>
                             <strong>{candidate.name}</strong>
@@ -683,7 +793,7 @@ export default function HomePage() {
                       ))}
                     </tbody>
                   </table>
-                  <p className="scoreDisclaimer">A aderência é uma estimativa baseada apenas no título e no trecho público indexado pelo Google. Confirme o perfil completo no LinkedIn antes de decidir.</p>
+                  <p className="scoreDisclaimer">O ranking considera somente informações profissionais da vaga e do trecho público indexado pelo Google. Não usa nem infere características pessoais sensíveis. Confirme o perfil completo no LinkedIn: a decisão final deve ser humana.</p>
                 </div> : <div className="emptyState"><UsersRound size={38} /><strong>{searchStatus === "working" ? "Busca em andamento" : searchStatus === "empty" ? "Busca finalizada sem perfis" : searchStatus === "error" ? "A busca automática não foi executada" : "Nenhuma busca ativada"}</strong><span>{searchStatus === "error" ? "Confira o aviso e conecte o Serper em Configurações." : "Preencha a vaga e consulte os perfis públicos pelo Serper."}</span></div>}
                 {searchStrategies.length > 0 && <div className="manualSearches">
                   <span className="kicker">PESQUISA MANUAL COMPLEMENTAR</span>

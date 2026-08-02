@@ -4,10 +4,12 @@ export type TalentProvider = "serper";
 
 export type TalentSearchInput = {
   title: string;
+  titleVariants?: string[];
   city: string;
   additionalCity: string;
   description: string;
   keywords: string[];
+  semanticKeywords?: string[];
   nationwide: boolean;
 };
 
@@ -320,9 +322,13 @@ function simplifiedTitle(value: string) {
     .trim();
 }
 
-function titleVariants(value: string) {
+function titleVariants(value: string, suppliedVariants: string[] = []) {
   const title = naturalSearchTerm(value);
-  const variants = [title, simplifiedTitle(title)];
+  const variants = [
+    title,
+    ...suppliedVariants.map(naturalSearchTerm),
+    simplifiedTitle(title),
+  ];
   const aliases: Array<[RegExp, string]> = [
     [/administra(?:ç|c)[aã]o de pessoal/i, "departamento pessoal"],
     [/departamento pessoal/i, "administração de pessoal"],
@@ -343,23 +349,24 @@ function titleVariants(value: string) {
 }
 
 function searchQueries(input: TalentSearchInput) {
-  // The free Serper tier blocks the `site:` operator, but accepts the profile
-  // path as a normal term. This keeps Google focused on individual profiles.
+  // O X-Ray é a estratégia principal. Se o plano do Serper recusar o
+  // operador, as consultas naturais com o caminho do LinkedIn assumem.
   const linkedinProfileHint = "linkedin.com/in";
   const locations = input.nationwide
     ? ["Brasil"]
     : [input.city, input.additionalCity].filter(Boolean);
-  const keywords = (input.keywords.length
-    ? input.keywords
-    : descriptionTerms(input.description)).map(naturalSearchTerm).filter(Boolean);
-  const titles = titleVariants(input.title);
+  const keywords = unique([
+    ...(input.semanticKeywords || []),
+    ...(input.keywords.length ? input.keywords : descriptionTerms(input.description)),
+  ]).map(naturalSearchTerm).filter(Boolean);
+  const titles = titleVariants(input.title, input.titleVariants);
   const primaryQuery = [linkedinProfileHint, titles[0], ...locations]
     .map(naturalSearchTerm)
     .filter(Boolean)
     .join(" ");
   const naturalCandidates: SerperSearch[] = [
     { query: primaryQuery, page: 1 },
-    ...titles.slice(1, 3).map((title) => ({
+    ...titles.slice(1, 4).map((title) => ({
       query: [linkedinProfileHint, title, ...locations]
         .map(naturalSearchTerm)
         .filter(Boolean)
@@ -380,19 +387,18 @@ function searchQueries(input: TalentSearchInput) {
     if (seenNatural.has(key)) return false;
     seenNatural.add(key);
     return true;
-  }).slice(0, 3);
+  }).slice(0, 4);
 
-  const xrayTitles = titles.slice(0, 2);
-  const xray: SerperSearch[] = [
-    ...xrayTitles.map((title) => ({
-      query: `site:linkedin.com/in ${[title, ...locations].map(naturalSearchTerm).filter(Boolean).join(" ")}`,
-      page: 1,
-    })),
-    {
+  const xray: SerperSearch[] = titles.slice(0, 4).map((title) => ({
+    query: `site:linkedin.com/in ${[title, ...locations].map(naturalSearchTerm).filter(Boolean).join(" ")}`,
+    page: 1,
+  }));
+  if (xray.length < 4) {
+    xray.push({
       query: `site:linkedin.com/in ${[titles[0], ...locations].map(naturalSearchTerm).filter(Boolean).join(" ")}`,
       page: 2,
-    },
-  ];
+    });
+  }
 
   return {
     xray,
