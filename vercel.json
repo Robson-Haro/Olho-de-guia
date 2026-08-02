@@ -1,6 +1,17 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs",
-  "buildCommand": "npm run build",
-  "outputDirectory": ".next"
+  "services": {
+    "frontend": { "root": ".", "framework": "nextjs" },
+    "intelligence": { "root": "python-service/", "entrypoint": "main:app" }
+  },
+  "rewrites": [
+    {
+      "source": "/svc/intelligence/:path*",
+      "destination": { "service": "intelligence" }
+    },
+    {
+      "source": "/(.*)",
+      "destination": { "service": "frontend" }
+    }
+  ]
 }

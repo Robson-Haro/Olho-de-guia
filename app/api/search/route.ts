@@ -3,10 +3,12 @@ import { searchTalentSources } from "@/lib/talent-sources";
 
 type SearchRequest = {
   title?: string;
+  titleVariants?: string[];
   city?: string;
   additionalCity?: string;
   description?: string;
   keywords?: string[];
+  semanticKeywords?: string[];
   nationwide?: boolean;
 };
 
@@ -42,6 +44,12 @@ export async function POST(request: Request) {
     const keywords = Array.isArray(body.keywords)
       ? body.keywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 4)
       : [];
+    const titleVariants = Array.isArray(body.titleVariants)
+      ? body.titleVariants.map((item) => clean(item, 150)).filter(Boolean).slice(0, 10)
+      : [];
+    const semanticKeywords = Array.isArray(body.semanticKeywords)
+      ? body.semanticKeywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 12)
+      : [];
     if (!title || !description || (!nationwide && !city)) {
       return NextResponse.json(
         { error: "Título, descrição e cidade são obrigatórios, exceto em buscas para todo o Brasil." },
@@ -52,10 +60,12 @@ export async function POST(request: Request) {
     const strategies = manualStrategies(title, city, additionalCity, keywords, nationwide);
     const result = await searchTalentSources({
       title,
+      titleVariants,
       city,
       additionalCity,
       description,
       keywords,
+      semanticKeywords,
       nationwide,
     });
 
