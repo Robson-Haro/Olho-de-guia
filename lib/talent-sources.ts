@@ -10,6 +10,7 @@ export type TalentSearchInput = {
   description: string;
   keywords: string[];
   semanticKeywords?: string[];
+  requiredKeywordConcepts?: RequiredKeywordConcept[];
   nationwide: boolean;
   maxCandidates: number;
 };
@@ -26,6 +27,8 @@ export type TalentCandidate = {
   summary?: string;
   compatibility: number;
   matchReason: string;
+  matchedRequiredKeywords?: string[];
+  missingRequiredKeywords?: string[];
 };
 
 export type ProviderSearchStatus = {
@@ -110,6 +113,26 @@ const STOP_WORDS = new Set([
   "que", "se", "um", "uma", "the", "and", "at", "for", "in", "of", "to",
   "profissional", "profissionais", "responsavel", "responsabilidades", "vaga",
 ]);
+
+export type RequiredKeywordConcept = {
+  label: string;
+  aliases: string[];
+};
+
+const REQUIRED_KEYWORD_EQUIVALENTS: Record<string, string[]> = {
+  "Couro / Leather": [
+    "couro", "couros", "leather", "leather industry", "cuero", "cueros", "piel",
+  ],
+  "Curtume / Tannery": [
+    "curtume", "curtumes", "tannery", "tanneries", "tanning", "curtiembre",
+    "curtiembres", "curtiduria", "curtiduría", "curtido de cuero",
+  ],
+  "Padronização de processos": [
+    "padronização de processos", "padronizacao de processos", "process standardization",
+    "process governance", "governança de processos", "governanca de processos",
+    "estandarización de procesos", "estandarizacion de procesos",
+  ],
+};
 
 function plain(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -217,6 +240,53 @@ function includesNormalized(text: string, value: string) {
   return withoutAccents(text).includes(withoutAccents(value));
 }
 
+function requiredKeywordConcepts(values: string[], supplied: RequiredKeywordConcept[] = []) {
+  if (supplied.length) {
+    return supplied.slice(0, 12).map((concept) => ({
+      label: plain(concept.label).slice(0, 100),
+      aliases: unique((Array.isArray(concept.aliases) ? concept.aliases : [])
+        .map((alias) => plain(alias).slice(0, 100))
+        .filter(Boolean))
+        .slice(0, 16),
+    })).filter((concept) => concept.label && concept.aliases.length);
+  }
+  const concepts: RequiredKeywordConcept[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const raw = plain(value).replace(/\s+/g, " ");
+    if (!raw) continue;
+    const matchingGroups = Object.entries(REQUIRED_KEYWORD_EQUIVALENTS)
+      .filter(([, aliases]) => aliases.some((alias) => includesNormalized(raw, alias)));
+    const resolved = matchingGroups.length
+      ? matchingGroups.map(([label, aliases]) => ({ label, aliases }))
+      : [{ label: raw, aliases: [raw] }];
+    for (const concept of resolved) {
+      const key = withoutAccents(concept.label);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      concepts.push({ label: concept.label, aliases: unique(concept.aliases) });
+    }
+  }
+  return concepts;
+}
+
+function requiredKeywordEvidence(
+  candidateText: string,
+  keywords: string[],
+  supplied: RequiredKeywordConcept[] = [],
+) {
+  const concepts = requiredKeywordConcepts(keywords, supplied);
+  const matched = concepts
+    .filter((concept) => concept.aliases.some((alias) => includesNormalized(candidateText, alias)))
+    .map((concept) => concept.label);
+  const matchedSet = new Set(matched);
+  return {
+    concepts,
+    matched,
+    missing: concepts.filter((concept) => !matchedSet.has(concept.label)).map((concept) => concept.label),
+  };
+}
+
 function calculateCompatibility(
   candidate: Pick<TalentCandidate, "title" | "company" | "city" | "state" | "summary">,
   input: TalentSearchInput,
@@ -229,8 +299,13 @@ function calculateCompatibility(
   const matchedTitle = titleTerms.filter((term) => normalizedCandidate.includes(term));
   const titleScore = titleTerms.length ? Math.round((matchedTitle.length / titleTerms.length) * 55) : 0;
 
-  const keywordPhrases = input.keywords.length ? input.keywords : descriptionTerms(input.description);
-  const matchedKeywords = keywordPhrases.filter((keyword) => includesNormalized(candidateText, keyword));
+  const requiredEvidence = requiredKeywordEvidence(candidateText, input.keywords, input.requiredKeywordConcepts);
+  const keywordPhrases = requiredEvidence.concepts.length
+    ? requiredEvidence.concepts.map((concept) => concept.label)
+    : descriptionTerms(input.description);
+  const matchedKeywords = requiredEvidence.concepts.length
+    ? requiredEvidence.matched
+    : keywordPhrases.filter((keyword) => includesNormalized(candidateText, keyword));
   const keywordScore = keywordPhrases.length
     ? Math.round((matchedKeywords.length / keywordPhrases.length) * 30)
     : 0;
@@ -245,7 +320,12 @@ function calculateCompatibility(
     `${matchedKeywords.length}/${keywordPhrases.length || 0} competência(s) pública(s)`,
     input.nationwide ? "busca nacional" : matchedLocation ? "localidade compatível" : "localidade não confirmada",
   ];
-  return { compatibility, matchReason: reasons.join(" · ") };
+  return {
+    compatibility,
+    matchReason: reasons.join(" · "),
+    matchedRequiredKeywords: requiredEvidence.matched,
+    missingRequiredKeywords: requiredEvidence.missing,
+  };
 }
 
 function parseProfessionalTitle(value: unknown) {
@@ -288,6 +368,15 @@ function serperCandidate(
     state: location.state,
     summary: summary || undefined,
   };
+  const publicEvidence = [
+    baseCandidate.title,
+    baseCandidate.company,
+    baseCandidate.city,
+    baseCandidate.state,
+    baseCandidate.summary,
+  ].filter(Boolean).join(" ");
+  const requiredEvidence = requiredKeywordEvidence(publicEvidence, input.keywords, input.requiredKeywordConcepts);
+  if (requiredEvidence.missing.length) return null;
   const score = calculateCompatibility(baseCandidate, input);
   return {
     id: `serper:${plain(result.position) || index}:${profileUrl}`,
@@ -356,26 +445,19 @@ function searchQueries(input: TalentSearchInput) {
   const locations = input.nationwide
     ? ["Brasil"]
     : [input.city, input.additionalCity].filter(Boolean);
-  const keywords = unique([
-    ...(input.semanticKeywords || []),
-    ...(input.keywords.length ? input.keywords : descriptionTerms(input.description)),
-  ]).map(naturalSearchTerm).filter(Boolean);
+  const requiredConcepts = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts);
+  const requiredNaturalTerms = requiredConcepts
+    .map((concept) => naturalSearchTerm(concept.aliases[0] || concept.label))
+    .filter(Boolean);
   const titles = titleVariants(input.title, input.titleVariants);
-  const primaryQuery = [linkedinProfileHint, titles[0], ...locations]
+  const primaryQuery = [linkedinProfileHint, titles[0], ...requiredNaturalTerms, ...locations]
     .map(naturalSearchTerm)
     .filter(Boolean)
     .join(" ");
   const naturalCandidates: SerperSearch[] = [
     { query: primaryQuery, page: 1 },
     ...titles.slice(1, 4).map((title) => ({
-      query: [linkedinProfileHint, title, ...locations]
-        .map(naturalSearchTerm)
-        .filter(Boolean)
-        .join(" "),
-      page: 1,
-    })),
-    ...keywords.slice(0, 3).map((keyword) => ({
-      query: [linkedinProfileHint, titles[0], keyword, ...locations]
+      query: [linkedinProfileHint, title, ...requiredNaturalTerms, ...locations]
         .map(naturalSearchTerm)
         .filter(Boolean)
         .join(" "),
@@ -390,13 +472,17 @@ function searchQueries(input: TalentSearchInput) {
     return true;
   }).slice(0, 4);
 
+  const xrayKeywordGroups = requiredConcepts.map((concept) => {
+    const aliases = concept.aliases.slice(0, 5).map((alias) => `"${naturalSearchTerm(alias)}"`).filter((alias) => alias !== '""');
+    return aliases.length > 1 ? `(${aliases.join(" OR ")})` : aliases[0] || "";
+  }).filter(Boolean);
   const xray: SerperSearch[] = titles.slice(0, 4).map((title) => ({
-    query: `site:linkedin.com/in ${[title, ...locations].map(naturalSearchTerm).filter(Boolean).join(" ")}`,
+    query: `site:linkedin.com/in "${naturalSearchTerm(title)}" ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
     page: 1,
   }));
   if (xray.length < 4) {
     xray.push({
-      query: `site:linkedin.com/in ${[titles[0], ...locations].map(naturalSearchTerm).filter(Boolean).join(" ")}`,
+      query: `site:linkedin.com/in "${naturalSearchTerm(titles[0])}" ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
       page: 2,
     });
   }
@@ -527,6 +613,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
   try {
     const result = await searchSerper(saved.value, input);
     const candidates = result.candidates;
+    const requiredCount = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts).length;
     return {
       candidates,
       providers: [{
@@ -535,7 +622,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
         status: "success" as const,
         count: candidates.length,
         queries: result.queries,
-        message: `${PROVIDER.label} executou ${result.queries} consulta(s) adaptativa(s) e retornou ${candidates.length} de até ${input.maxCandidates} perfil(is) público(s) do LinkedIn.`,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) adaptativa(s) e retornou ${candidates.length} de até ${input.maxCandidates} perfil(is) público(s) do LinkedIn${requiredCount ? ` com ${requiredCount} palavra(s)-chave obrigatória(s) validada(s)` : ""}.`,
       }],
       configured: true,
     };

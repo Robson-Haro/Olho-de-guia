@@ -172,6 +172,18 @@ ROLE_FAMILIES: dict[str, dict[str, Any]] = {
         },
         "signals": ("capex", "autocad", "projetos", "implantacao", "processos", "industrial"),
     },
+    "process_excellence": {
+        "label": "Padronização e Excelência de Processos",
+        "functions": {
+            "pt": ("padronização de processos", "gestão de processos", "excelência operacional", "melhoria contínua"),
+            "en": ("process standardization", "process management", "operational excellence", "continuous improvement"),
+            "es": ("estandarización de procesos", "gestión de procesos", "excelencia operacional", "mejora continua"),
+        },
+        "signals": (
+            "governanca de processos", "governance", "mapeamento de processos", "process mapping",
+            "bpm", "lean", "six sigma", "procedimentos", "sop", "processos industriais",
+        ),
+    },
     "data": {
         "label": "Dados / Data",
         "functions": {
@@ -238,6 +250,22 @@ ROLE_FAMILIES: dict[str, dict[str, Any]] = {
 }
 
 
+KEYWORD_EQUIVALENTS: dict[str, tuple[str, ...]] = {
+    "Couro / Leather": (
+        "couro", "couros", "leather", "leather industry", "cuero", "cueros", "piel",
+    ),
+    "Curtume / Tannery": (
+        "curtume", "curtumes", "tannery", "tanneries", "tanning", "curtiembre",
+        "curtiembres", "curtiduria", "curtiduría", "curtido de cuero",
+    ),
+    "Padronização de processos": (
+        "padronizacao de processos", "padronização de processos", "process standardization",
+        "process governance", "governanca de processos", "governança de processos",
+        "estandarizacion de procesos", "estandarización de procesos",
+    ),
+}
+
+
 SKILL_GROUPS: dict[str, tuple[str, ...]] = {
     "Excel": ("excel", "planilhas avancadas", "tabela dinamica", "vlookup", "procv"),
     "Power BI": ("power bi", "powerbi"),
@@ -268,7 +296,14 @@ SKILL_GROUPS: dict[str, tuple[str, ...]] = {
     "Budget e forecast": ("budget", "forecast", "orcamento", "previsao"),
     "Recrutamento e seleção": ("recrutamento", "recruitment", "recruiting", "reclutamiento", "selecao"),
     "Clima e engajamento": ("clima", "engajamento", "engagement", "compromiso"),
+    **KEYWORD_EQUIVALENTS,
 }
+
+
+@dataclass(frozen=True)
+class KeywordConcept:
+    label: str
+    aliases: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -278,6 +313,7 @@ class JobIntelligence:
     level: str | None
     equivalent_titles: tuple[str, ...]
     skills: tuple[str, ...]
+    required_keywords: tuple[KeywordConcept, ...]
 
 
 def normalize(value: Any) -> str:
@@ -316,6 +352,45 @@ def phrase_in(text: str, phrase: str) -> bool:
 def is_sensitive(value: str) -> bool:
     normalized = normalize(value)
     return any(phrase_in(normalized, phrase) for phrase in SENSITIVE_PHRASES)
+
+
+def keyword_concepts(explicit_keywords: Iterable[str]) -> list[KeywordConcept]:
+    """Transforma cada palavra-chave explícita em um critério obrigatório multilíngue.
+
+    Um campo composto conhecido, como "Couro e Curtume", vira dois conceitos
+    independentes. Termos sem taxonomia continuam obrigatórios pela grafia informada.
+    """
+    concepts: list[KeywordConcept] = []
+    seen: set[str] = set()
+    for value in explicit_keywords:
+        raw = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not raw or is_sensitive(raw):
+            continue
+        normalized_raw = normalize(raw)
+        matched_known_group = False
+        for label, aliases in SKILL_GROUPS.items():
+            if any(phrase_in(normalized_raw, alias) for alias in aliases):
+                key = normalize(label)
+                if key not in seen:
+                    seen.add(key)
+                    concepts.append(KeywordConcept(label=label, aliases=tuple(unique(aliases))))
+                matched_known_group = True
+        if not matched_known_group:
+            key = normalize(raw)
+            if key not in seen:
+                seen.add(key)
+                concepts.append(KeywordConcept(label=raw, aliases=(raw,)))
+    return concepts
+
+
+def keyword_evidence(concepts: Iterable[KeywordConcept], candidate_text: str) -> tuple[list[str], list[str]]:
+    normalized_candidate = normalize(candidate_text)
+    matched: list[str] = []
+    missing: list[str] = []
+    for concept in concepts:
+        target = matched if any(phrase_in(normalized_candidate, alias) for alias in concept.aliases) else missing
+        target.append(concept.label)
+    return matched, missing
 
 
 def detect_level(title: str) -> str | None:
@@ -393,7 +468,7 @@ def equivalent_titles(title: str, family_key: str | None, level: str | None) -> 
 
 def detected_skills(description: str, explicit_keywords: Iterable[str] = ()) -> list[str]:
     text = normalize(description)
-    result = unique(keyword for keyword in explicit_keywords if not is_sensitive(str(keyword)))
+    result = [concept.label for concept in keyword_concepts(explicit_keywords)]
     for canonical, aliases in SKILL_GROUPS.items():
         if any(phrase_in(text, alias) for alias in aliases):
             result.append(canonical)
@@ -420,6 +495,7 @@ def analyze_job(job: dict[str, Any]) -> JobIntelligence:
         level=level,
         equivalent_titles=tuple(equivalent_titles(title, family, level)),
         skills=tuple(detected_skills(description, explicit)),
+        required_keywords=tuple(keyword_concepts(explicit)),
     )
 
 
@@ -503,6 +579,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         title_alignment = "cargo parcialmente relacionado" if role_score >= 18 else "cargo pouco relacionado"
 
     matches = skill_matches(intelligence.skills, candidate_text)
+    matched_required, missing_required = keyword_evidence(intelligence.required_keywords, candidate_text)
     skill_denominator = min(max(len(intelligence.skills), 1), 6)
     skill_score = min(30.0, (len(matches) / skill_denominator) * 30.0)
     seniority_score, seniority_reason = level_alignment(intelligence.level, candidate_level)
@@ -514,6 +591,10 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     reasons = [
         title_alignment,
         f"{len(matches)}/{min(len(intelligence.skills), 6)} competência(s) visível(is)",
+        *(
+            [f"{len(matched_required)}/{len(intelligence.required_keywords)} palavra(s)-chave obrigatória(s)"]
+            if intelligence.required_keywords else []
+        ),
         seniority_reason,
         location_reason,
     ]
@@ -523,6 +604,8 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         "matchReason": " · ".join(reasons),
         "matchedSkills": matches[:8],
         "missingSkills": missing,
+        "matchedRequiredKeywords": matched_required,
+        "missingRequiredKeywords": missing_required,
         "titleAlignment": title_alignment,
         "evidenceConfidence": confidence,
         "evidenceLabel": confidence_label,
@@ -534,6 +617,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
 def rank_candidates(job: dict[str, Any], candidates: Iterable[dict[str, Any]]) -> tuple[JobIntelligence, list[dict[str, Any]]]:
     intelligence = analyze_job(job)
     ranked = [rank_candidate(job, intelligence, candidate) for candidate in candidates]
+    ranked = [candidate for candidate in ranked if not candidate.get("missingRequiredKeywords")]
     ranked.sort(
         key=lambda item: (
             int(item.get("compatibility") or 0),
@@ -554,5 +638,9 @@ def intelligence_payload(intelligence: JobIntelligence) -> dict[str, Any]:
         "level": intelligence.level,
         "equivalentTitles": list(intelligence.equivalent_titles),
         "skills": list(intelligence.skills),
+        "requiredKeywords": [
+            {"label": concept.label, "aliases": list(concept.aliases)}
+            for concept in intelligence.required_keywords
+        ],
         "languages": ["pt", "en", "es"],
     }
