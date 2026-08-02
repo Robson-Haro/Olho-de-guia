@@ -4,6 +4,39 @@
   gap: 12px;
 }
 
+.homeShortcut {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 2px solid rgba(255, 255, 255, .62);
+  color: #091522;
+  background: linear-gradient(145deg, #f7f3c9, #c9a84c);
+  padding: 11px 16px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 1px;
+  text-decoration: none;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, .72), inset 0 -2px 0 rgba(99, 74, 14, .32), 0 5px 0 #80691f, 0 14px 28px rgba(0, 0, 0, .38);
+  transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
+}
+
+.homeShortcut:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, .8), inset 0 -2px 0 rgba(99, 74, 14, .3), 0 7px 0 #80691f, 0 19px 34px rgba(0, 0, 0, .45);
+}
+
+.homeShortcut:active {
+  transform: translateY(4px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5), 0 1px 0 #80691f, 0 8px 18px rgba(0, 0, 0, .32);
+}
+
+.homeShortcut:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
 .configShortcut {
   display: flex;
   align-items: center;
@@ -27,6 +60,8 @@
 
 @media (max-width: 720px) {
   .headerActions { gap: 5px; }
+  .homeShortcut { padding: 11px; }
+  .homeShortcut span { display: none; }
   .configShortcut { padding: 11px; }
   .configShortcut span { display: none; }
   nav { overflow-x: auto; }
