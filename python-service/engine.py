@@ -265,6 +265,13 @@ KEYWORD_EQUIVALENTS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Um curtume é, por definição operacional, parte da cadeia do couro. Portanto,
+# evidência pública de curtume também comprova o contexto de couro; o inverso
+# não é verdadeiro (um perfil pode atuar com couro sem experiência em curtume).
+KEYWORD_IMPLICATIONS: dict[str, tuple[str, ...]] = {
+    "Curtume / Tannery": ("Couro / Leather",),
+}
+
 
 SKILL_GROUPS: dict[str, tuple[str, ...]] = {
     "Excel": ("excel", "planilhas avancadas", "tabela dinamica", "vlookup", "procv"),
@@ -385,11 +392,17 @@ def keyword_concepts(explicit_keywords: Iterable[str]) -> list[KeywordConcept]:
 
 def keyword_evidence(concepts: Iterable[KeywordConcept], candidate_text: str) -> tuple[list[str], list[str]]:
     normalized_candidate = normalize(candidate_text)
-    matched: list[str] = []
-    missing: list[str] = []
-    for concept in concepts:
-        target = matched if any(phrase_in(normalized_candidate, alias) for alias in concept.aliases) else missing
-        target.append(concept.label)
+    concept_list = list(concepts)
+    matched_labels = {
+        concept.label
+        for concept in concept_list
+        if any(phrase_in(normalized_candidate, alias) for alias in concept.aliases)
+    }
+    for source, implied_labels in KEYWORD_IMPLICATIONS.items():
+        if source in matched_labels:
+            matched_labels.update(implied_labels)
+    matched = [concept.label for concept in concept_list if concept.label in matched_labels]
+    missing = [concept.label for concept in concept_list if concept.label not in matched_labels]
     return matched, missing
 
 
