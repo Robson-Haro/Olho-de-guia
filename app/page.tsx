@@ -324,7 +324,7 @@ export default function HomePage() {
         </nav>
         <div className="navBottom">
           <a href="https://robinho-minerva-foods1-muen.vercel.app/">
-            <Home size={18} /> Portfólio
+            <Home size={18} /> HOME
           </a>
         </div>
       </aside>
@@ -336,6 +336,14 @@ export default function HomePage() {
             <p>Encontre os talentos certos antes da concorrência.</p>
           </div>
           <div className="headerActions">
+            <a
+              className="homeShortcut"
+              href="https://robinho-minerva-foods1-muen.vercel.app/"
+              aria-label="Voltar para o Ecossistema de Talent Acquisition Estratégico"
+            >
+              <Home size={18} />
+              <span>HOME</span>
+            </a>
             {active !== "Configurações" && (
               <button
                 className="configShortcut"
