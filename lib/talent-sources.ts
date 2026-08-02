@@ -11,6 +11,7 @@ export type TalentSearchInput = {
   keywords: string[];
   semanticKeywords?: string[];
   nationwide: boolean;
+  maxCandidates: number;
 };
 
 export type TalentCandidate = {
@@ -425,6 +426,7 @@ async function callSerper(apiKey: string, query: string, num = 10, page = 1) {
 
 async function searchSerper(apiKey: string, input: TalentSearchInput) {
   const plan = searchQueries(input);
+  const maxCandidates = Math.min(20, Math.max(1, Math.trunc(input.maxCandidates || 20)));
   const parsePayloads = (payloads: Array<Record<string, unknown> | null>) => payloads.flatMap((payload, payloadIndex) => {
     const organic = Array.isArray(payload?.organic)
       ? payload.organic as Array<Record<string, unknown>>
@@ -433,46 +435,50 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
       .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, input))
       .filter((candidate): candidate is TalentCandidate => Boolean(candidate));
   });
+  let queries = 0;
+  let candidates: TalentCandidate[] = [];
+  let firstError: Error | null = null;
 
-  const xrayResults = await Promise.allSettled(
-    plan.xray.map((item) => callSerper(apiKey, item.query, 10, item.page)),
-  );
-  const successfulXray = xrayResults
-    .filter((result): result is PromiseFulfilledResult<Record<string, unknown> | null> => result.status === "fulfilled")
-    .map((result) => result.value);
-  let queries = successfulXray.length;
-  let candidates = deduplicate(parsePayloads(successfulXray));
-
-  if (!successfulXray.length) {
-    const naturalResults = await Promise.allSettled(
-      plan.natural.map((item) => callSerper(apiKey, item.query, 10, item.page)),
-    );
-    const successfulNatural = naturalResults
-      .filter((result): result is PromiseFulfilledResult<Record<string, unknown> | null> => result.status === "fulfilled")
-      .map((result) => result.value);
-    if (!successfulNatural.length) {
-      const firstError = [...xrayResults, ...naturalResults]
-        .find((result): result is PromiseRejectedResult => result.status === "rejected");
-      throw firstError?.reason instanceof Error
-        ? firstError.reason
-        : new Error(`${PROVIDER.label}: nenhuma estratégia de busca pôde ser executada.`);
+  const runSequentially = async (searches: SerperSearch[]) => {
+    let successful = 0;
+    for (const item of searches) {
+      if (candidates.length >= maxCandidates || queries >= 4) break;
+      const remaining = maxCandidates - candidates.length;
+      try {
+        const payload = await callSerper(apiKey, item.query, Math.min(10, remaining), item.page);
+        queries += 1;
+        successful += 1;
+        candidates = deduplicate([...candidates, ...parsePayloads([payload])]).slice(0, maxCandidates);
+      } catch (error) {
+        if (!firstError && error instanceof Error) firstError = error;
+      }
     }
-    queries += successfulNatural.length;
-    candidates = deduplicate(parsePayloads(successfulNatural));
+    return successful;
+  };
+
+  const successfulXray = await runSequentially(plan.xray);
+  if ((!successfulXray || !candidates.length) && candidates.length < maxCandidates && queries < 4) {
+    await runSequentially(plan.natural);
   }
 
-  if (candidates.length < 8 && queries < 4) {
+  if (!queries) {
+    throw firstError || new Error(`${PROVIDER.label}: nenhuma estratégia de busca pôde ser executada.`);
+  }
+
+  const fallbackThreshold = Math.min(8, maxCandidates);
+  if (candidates.length < fallbackThreshold && candidates.length < maxCandidates && queries < 4) {
     try {
-      const fallbackPayload = await callSerper(apiKey, plan.naturalFallback.query, 10, plan.naturalFallback.page);
+      const remaining = maxCandidates - candidates.length;
+      const fallbackPayload = await callSerper(apiKey, plan.naturalFallback.query, Math.min(10, remaining), plan.naturalFallback.page);
       queries += 1;
-      candidates = deduplicate([...candidates, ...parsePayloads([fallbackPayload])]);
+      candidates = deduplicate([...candidates, ...parsePayloads([fallbackPayload])]).slice(0, maxCandidates);
     } catch {
       // A busca principal continua válida mesmo quando a página adicional falha.
     }
   }
 
   return {
-    candidates: candidates.sort((a, b) => b.compatibility - a.compatibility),
+    candidates: candidates.sort((a, b) => b.compatibility - a.compatibility).slice(0, maxCandidates),
     queries,
   };
 }
@@ -529,7 +535,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
         status: "success" as const,
         count: candidates.length,
         queries: result.queries,
-        message: `${PROVIDER.label} executou ${result.queries} consulta(s) adaptativa(s) e retornou ${candidates.length} perfil(is) público(s) do LinkedIn.`,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) adaptativa(s) e retornou ${candidates.length} de até ${input.maxCandidates} perfil(is) público(s) do LinkedIn.`,
       }],
       configured: true,
     };

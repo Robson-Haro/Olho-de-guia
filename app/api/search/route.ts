@@ -10,6 +10,7 @@ type SearchRequest = {
   keywords?: string[];
   semanticKeywords?: string[];
   nationwide?: boolean;
+  maxCandidates?: number;
 };
 
 function clean(value: unknown, limit = 500) {
@@ -41,6 +42,10 @@ export async function POST(request: Request) {
     const additionalCity = clean(body.additionalCity, 100);
     const description = clean(body.description, 10000);
     const nationwide = body.nationwide === true;
+    const requestedMaximum = Number(body.maxCandidates);
+    const maxCandidates = Number.isFinite(requestedMaximum)
+      ? Math.min(20, Math.max(1, Math.trunc(requestedMaximum)))
+      : 20;
     const keywords = Array.isArray(body.keywords)
       ? body.keywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 4)
       : [];
@@ -67,6 +72,7 @@ export async function POST(request: Request) {
       keywords,
       semanticKeywords,
       nationwide,
+      maxCandidates,
     });
 
     if (!result.configured) {
