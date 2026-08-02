@@ -343,6 +343,9 @@ function titleVariants(value: string) {
 }
 
 function searchQueries(input: TalentSearchInput) {
+  // The free Serper tier blocks the `site:` operator, but accepts the profile
+  // path as a normal term. This keeps Google focused on individual profiles.
+  const linkedinProfileHint = "linkedin.com/in";
   const locations = input.nationwide
     ? ["Brasil"]
     : [input.city, input.additionalCity].filter(Boolean);
@@ -350,21 +353,21 @@ function searchQueries(input: TalentSearchInput) {
     ? input.keywords
     : descriptionTerms(input.description)).map(naturalSearchTerm).filter(Boolean);
   const titles = titleVariants(input.title);
-  const primaryQuery = ["LinkedIn", "perfil profissional", titles[0], ...locations]
+  const primaryQuery = [linkedinProfileHint, titles[0], ...locations]
     .map(naturalSearchTerm)
     .filter(Boolean)
     .join(" ");
   const candidates: SerperSearch[] = [
     { query: primaryQuery, page: 1 },
     ...titles.slice(1, 3).map((title) => ({
-      query: ["LinkedIn", "perfil profissional", title, ...locations]
+      query: [linkedinProfileHint, title, ...locations]
         .map(naturalSearchTerm)
         .filter(Boolean)
         .join(" "),
       page: 1,
     })),
     ...keywords.slice(0, 3).map((keyword) => ({
-      query: ["LinkedIn", titles[0], keyword, ...locations]
+      query: [linkedinProfileHint, titles[0], keyword, ...locations]
         .map(naturalSearchTerm)
         .filter(Boolean)
         .join(" "),
