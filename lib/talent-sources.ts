@@ -35,7 +35,7 @@ export type ProviderSearchStatus = {
 
 const PROVIDER = {
   key: "talent_source_serper_api_key",
-  label: "Serper · Google X-Ray",
+  label: "Serper · Busca LinkedIn",
 } as const;
 
 const BRAZIL_STATES: Record<string, string> = {
@@ -119,8 +119,13 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function quoteForGoogle(value: string) {
-  return `"${value.replace(/["“”]/g, " ").replace(/\s+/g, " ").trim()}"`;
+function naturalSearchTerm(value: string) {
+  return value
+    .replace(/\b(?:site|inurl|intitle|filetype|cache|related|before|after):\S+/gi, " ")
+    .replace(/["“”()[\]{}|]/g, " ")
+    .replace(/\b(?:AND|OR)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizeState(value: unknown) {
@@ -304,10 +309,20 @@ function providerError(response: Response, payload: unknown) {
 
 function searchQuery(input: TalentSearchInput) {
   const locations = input.nationwide
-    ? "(Brasil OR Brazil)"
-    : `(${[input.city, input.additionalCity].filter(Boolean).map(quoteForGoogle).join(" OR ")})`;
-  const keywords = input.keywords.map(quoteForGoogle).join(" ");
-  return [`site:linkedin.com/in/`, quoteForGoogle(input.title), locations, keywords]
+    ? ["Brasil"]
+    : [input.city, input.additionalCity].filter(Boolean);
+  const keywords = input.keywords.length
+    ? input.keywords
+    : descriptionTerms(input.description).slice(0, 4);
+
+  return unique([
+    "LinkedIn",
+    "perfil profissional",
+    input.title,
+    ...locations,
+    ...keywords.slice(0, 4),
+  ])
+    .map(naturalSearchTerm)
     .filter(Boolean)
     .join(" ");
 }
@@ -366,7 +381,7 @@ export async function saveTalentSourceKey(provider: TalentProvider, apiKey: stri
 
 export async function testTalentSourceKey(provider: TalentProvider, apiKey: string) {
   if (provider !== "serper") throw new Error("Fonte de talentos inválida.");
-  await callSerper(apiKey, 'site:linkedin.com/in/ "Talent Acquisition" Brasil', 1);
+  await callSerper(apiKey, "LinkedIn perfil profissional Talent Acquisition Brasil", 1);
   return true;
 }
 
