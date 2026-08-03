@@ -18,7 +18,7 @@ Copie `.env.example` para `.env.local` e configure Supabase, e-mail administrado
 1. Crie uma conta em [serper.dev](https://serper.dev/) e copie a API key.
 2. No Eureka, abra **Configurações > Fontes de talentos**.
 3. Cole a chave em **Serper · Busca LinkedIn** e clique em **Salvar e ativar**.
-4. Cada teste executa uma consulta Serper. A busca adaptativa usa de 3 a 4 consultas para pesquisar o título principal, variações do cargo e uma página adicional quando a cobertura é baixa. O cadastro inicial do Serper inclui 2.500 consultas gratuitas, sem cartão.
+4. Cada teste executa uma consulta Serper. A busca adaptativa usa até 8 consultas curtas em camadas — título exato, cargos equivalentes, domínio e páginas adicionais — para formar um conjunto amplo e só então selecionar os melhores perfis. O limite pode ser ajustado com `EUREKA_SERPER_BUDGET` (4 a 16). O cadastro inicial do Serper inclui 2.500 consultas gratuitas, sem cartão.
 
 O backend monta uma pesquisa natural compatível com contas gratuitas do Serper, aceita somente URLs públicas de perfis individuais do LinkedIn e remove duplicidades. Antes da pesquisa, o motor Python identifica cargos equivalentes em português, inglês e espanhol. Cada palavra-chave preenchida é tratada como critério obrigatório (AND), com equivalentes multilíngues quando disponíveis; perfis sem evidência pública de todos os conceitos informados são descartados antes de entrar no limite solicitado. Depois, o motor reordena os resultados por aderência profissional explicável: função, competências, senioridade e localização visíveis no resultado público. O sistema não faz scraping do LinkedIn e não usa enriquecimento do Apollo.
 
