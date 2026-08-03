@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getGupyToken } from "@/lib/gupy-config";
+import { findCountryCode, getCountryProfile } from "@/lib/geography";
 
 type GupyJob = Record<string, unknown>;
 
@@ -37,12 +38,21 @@ function richText(value: unknown) {
 function normalizeJob(job: GupyJob) {
   const city = text(job.addressCity);
   const state = text(job.addressStateShortName) || text(job.addressState);
+  const rawCountry = text(job.addressCountryName)
+    || text(job.addressCountry)
+    || text(job.countryName)
+    || text(job.country);
+  const countryCode = findCountryCode(rawCountry, "BR");
+  const country = getCountryProfile(countryCode).name;
 
   return {
     id: String(job.id ?? ""),
     code: String(job.code ?? job.id ?? ""),
     title: text(job.name) || text(job.title) || "Vaga sem título",
-    city: [city, state].filter(Boolean).join(" - "),
+    city,
+    state,
+    country,
+    countryCode,
     description: richText(job.description),
     responsibilities: richText(job.responsibilities),
     prerequisites: richText(job.prerequisites),

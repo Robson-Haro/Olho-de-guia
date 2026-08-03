@@ -16,6 +16,12 @@ from spreadsheet import create_candidate_workbook
 
 class JobInput(BaseModel):
     title: str = Field(min_length=1, max_length=180)
+    countryCode: str = Field(default="BR", min_length=2, max_length=2)
+    country: str = Field(default="Brasil", max_length=120)
+    subdivision: str = Field(default="", max_length=120)
+    cities: list[str] = Field(default_factory=list, max_length=20)
+    cityCount: int = Field(default=1, ge=1, le=20)
+    countrywide: bool = False
     city: str = Field(default="", max_length=120)
     additionalCity: str = Field(default="", max_length=120)
     description: str = Field(default="", max_length=20_000)

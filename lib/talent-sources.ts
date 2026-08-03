@@ -1,17 +1,20 @@
 import { getSecret, saveSecret } from "@/lib/secure-settings";
+import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
 
 export type TalentProvider = "serper";
 
 export type TalentSearchInput = {
   title: string;
   titleVariants?: string[];
-  city: string;
-  additionalCity: string;
+  countryCode: string;
+  country: string;
+  subdivision: string;
+  cities: string[];
   description: string;
   keywords: string[];
   semanticKeywords?: string[];
   requiredKeywordConcepts?: RequiredKeywordConcept[];
-  nationwide: boolean;
+  countrywide: boolean;
   maxCandidates: number;
 };
 
@@ -21,6 +24,7 @@ export type TalentCandidate = {
   title: string;
   city: string;
   state: string;
+  country: string;
   profileUrl: string;
   company?: string;
   source: "Google via Serper";
@@ -29,6 +33,9 @@ export type TalentCandidate = {
   matchReason: string;
   matchedRequiredKeywords?: string[];
   missingRequiredKeywords?: string[];
+  geographicMatch?: "city" | "subdivision" | "country" | "targeted" | "unknown";
+  geographicLabel?: string;
+  searchedLocations?: string[];
 };
 
 export type ProviderSearchStatus = {
@@ -202,6 +209,39 @@ export function locationFromText(value: string) {
   return { city: "", state: "" };
 }
 
+function geographicEvidence(value: string, input: TalentSearchInput, searchedLocations: string[] = []) {
+  const normalized = normalizeGeographyText(value);
+  const profile = getCountryProfile(input.countryCode);
+  const matchedCity = input.cities.find((city) => includesNormalized(normalized, city)) || "";
+  const matchedSubdivision = input.subdivision && includesNormalized(normalized, input.subdivision)
+    ? input.subdivision
+    : "";
+  const matchedCountry = profile.aliases.some((alias) => includesNormalized(normalized, alias));
+  const brazilLocation = input.countryCode === "BR" ? locationFromText(value) : { city: "", state: "" };
+  const city = matchedCity || brazilLocation.city;
+  const state = matchedSubdivision || brazilLocation.state;
+  const country = city || state || matchedCountry ? profile.name : "";
+  const geographicMatch: TalentCandidate["geographicMatch"] = matchedCity
+    ? "city"
+    : matchedSubdivision
+      ? "subdivision"
+      : matchedCountry
+        ? "country"
+        : searchedLocations.length
+          ? "targeted"
+          : "unknown";
+  const geographicLabel = matchedCity
+    ? `cidade confirmada: ${matchedCity}`
+    : matchedSubdivision
+      ? `${profile.subdivisionLabel.toLowerCase()} confirmado(a): ${matchedSubdivision}`
+      : matchedCountry
+        ? `país confirmado: ${profile.name}`
+        : searchedLocations.length
+          ? `consulta direcionada a ${searchedLocations.join(", ")}; confirmar no perfil`
+          : "localidade não confirmada no trecho público";
+  return { city, state, country, geographicMatch, geographicLabel };
+}
+
 function linkedinProfileUrl(value: unknown) {
   const link = plain(value);
   if (!link) return "";
@@ -296,10 +336,10 @@ function requiredKeywordEvidence(
 }
 
 function calculateCompatibility(
-  candidate: Pick<TalentCandidate, "title" | "company" | "city" | "state" | "summary">,
+  candidate: Pick<TalentCandidate, "title" | "company" | "city" | "state" | "country" | "summary" | "geographicMatch" | "geographicLabel">,
   input: TalentSearchInput,
 ) {
-  const candidateText = [candidate.title, candidate.company, candidate.city, candidate.state, candidate.summary]
+  const candidateText = [candidate.title, candidate.company, candidate.city, candidate.state, candidate.country, candidate.summary]
     .filter(Boolean)
     .join(" ");
   const normalizedCandidate = withoutAccents(candidateText);
@@ -318,15 +358,21 @@ function calculateCompatibility(
     ? Math.round((matchedKeywords.length / keywordPhrases.length) * 30)
     : 0;
 
-  const requestedLocations = [input.city, input.additionalCity].filter(Boolean);
-  const matchedLocation = input.nationwide || requestedLocations.some((location) => includesNormalized(candidateText, location));
-  const locationScore = matchedLocation ? 15 : 0;
+  const locationScore = candidate.geographicMatch === "city"
+    ? 15
+    : candidate.geographicMatch === "subdivision"
+      ? 11
+      : candidate.geographicMatch === "country"
+        ? 7
+        : candidate.geographicMatch === "targeted"
+          ? 3
+          : 0;
   const compatibility = Math.min(100, titleScore + keywordScore + locationScore);
 
   const reasons = [
     `${matchedTitle.length}/${titleTerms.length || 0} termo(s) do cargo`,
     `${matchedKeywords.length}/${keywordPhrases.length || 0} competência(s) pública(s)`,
-    input.nationwide ? "busca nacional" : matchedLocation ? "localidade compatível" : "localidade não confirmada",
+    candidate.geographicLabel || "localidade não confirmada",
   ];
   return {
     compatibility,
@@ -360,27 +406,31 @@ function serperCandidate(
   result: Record<string, unknown>,
   index: number,
   input: TalentSearchInput,
+  searchedLocations: string[] = [],
 ): TalentCandidate | null {
   const profileUrl = linkedinProfileUrl(result.link);
   if (!profileUrl) return null;
   const professional = parseProfessionalTitle(result.title);
   const summary = plain(result.snippet);
-  const summaryLocation = locationFromText(summary);
-  const location = summaryLocation.city || summaryLocation.state
-    ? summaryLocation
-    : locationFromText(plain(result.title));
+  const publicText = [plain(result.title), summary].filter(Boolean).join(" · ");
+  const location = geographicEvidence(publicText, input, searchedLocations);
   const baseCandidate = {
     title: professional.title,
     company: professional.company || undefined,
     city: location.city,
     state: location.state,
+    country: location.country,
     summary: summary || undefined,
+    geographicMatch: location.geographicMatch,
+    geographicLabel: location.geographicLabel,
+    searchedLocations,
   };
   const publicEvidence = [
     baseCandidate.title,
     baseCandidate.company,
     baseCandidate.city,
     baseCandidate.state,
+    baseCandidate.country,
     baseCandidate.summary,
   ].filter(Boolean).join(" ");
   const requiredEvidence = requiredKeywordEvidence(publicEvidence, input.keywords, input.requiredKeywordConcepts);
@@ -411,6 +461,7 @@ function providerError(response: Response, payload: unknown) {
 type SerperSearch = {
   query: string;
   page: number;
+  targetCities: string[];
 };
 
 function simplifiedTitle(value: string) {
@@ -446,13 +497,35 @@ function titleVariants(value: string, suppliedVariants: string[] = []) {
   return unique(variants.map(naturalSearchTerm).filter(Boolean));
 }
 
+function citySearchGroups(cities: string[]) {
+  const normalized = unique(cities.map(naturalSearchTerm).filter(Boolean));
+  if (!normalized.length) return [[]] as string[][];
+  const groupCount = Math.min(4, normalized.length);
+  const groups = Array.from({ length: groupCount }, () => [] as string[]);
+  normalized.forEach((city, index) => groups[index % groupCount].push(city));
+  return groups;
+}
+
+function geographicQuery(input: TalentSearchInput, cities: string[]) {
+  const profile = getCountryProfile(input.countryCode);
+  const countryTerms = profile.aliases
+    .slice(0, 4)
+    .map(naturalSearchTerm)
+    .filter(Boolean)
+    .map((alias) => `"${alias}"`);
+  const countryExpression = countryTerms.length > 1 ? `(${countryTerms.join(" OR ")})` : countryTerms[0] || "";
+  if (input.countrywide) return countryExpression;
+  const cityTerms = cities.map((city) => `"${naturalSearchTerm(city)}"`).filter((city) => city !== '""');
+  const cityExpression = cityTerms.length > 1 ? `(${cityTerms.join(" OR ")})` : cityTerms[0] || "";
+  return [cityExpression, input.subdivision ? `"${naturalSearchTerm(input.subdivision)}"` : "", countryExpression]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function searchQueries(input: TalentSearchInput) {
   // O X-Ray é a estratégia principal. Se o plano do Serper recusar o
   // operador, as consultas naturais com o caminho do LinkedIn assumem.
   const linkedinProfileHint = "linkedin.com/in";
-  const locations = input.nationwide
-    ? ["Brasil"]
-    : [input.city, input.additionalCity].filter(Boolean);
   const requiredConcepts = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts);
   const queryConcepts = requiredConcepts.filter((concept) => !requiredConcepts.some((possibleSource) =>
     (REQUIRED_KEYWORD_IMPLICATIONS[possibleSource.label] || []).includes(concept.label),
@@ -461,51 +534,49 @@ function searchQueries(input: TalentSearchInput) {
     .map((concept) => naturalSearchTerm(concept.aliases[0] || concept.label))
     .filter(Boolean);
   const titles = titleVariants(input.title, input.titleVariants);
-  const primaryQuery = [linkedinProfileHint, titles[0], ...requiredNaturalTerms, ...locations]
-    .map(naturalSearchTerm)
-    .filter(Boolean)
-    .join(" ");
-  const naturalCandidates: SerperSearch[] = [
-    { query: primaryQuery, page: 1 },
-    ...titles.slice(1, 4).map((title) => ({
-      query: [linkedinProfileHint, title, ...requiredNaturalTerms, ...locations]
-        .map(naturalSearchTerm)
-        .filter(Boolean)
-        .join(" "),
-      page: 1,
-    })),
-  ];
-  const seenNatural = new Set<string>();
-  const natural = naturalCandidates.filter((item) => {
-    const key = `${item.query.toLowerCase()}|${item.page}`;
-    if (seenNatural.has(key)) return false;
-    seenNatural.add(key);
-    return true;
-  }).slice(0, 4);
-
+  const groups = input.countrywide ? [[]] : citySearchGroups(input.cities);
   const xrayKeywordGroups = queryConcepts.map((concept) => {
     const aliases = concept.aliases.slice(0, 10).map((alias) => `"${naturalSearchTerm(alias)}"`).filter((alias) => alias !== '""');
     return aliases.length > 1 ? `(${aliases.join(" OR ")})` : aliases[0] || "";
   }).filter(Boolean);
-  const xray: SerperSearch[] = titles.slice(0, 4).map((title) => ({
-    query: `site:linkedin.com/in ${naturalSearchTerm(title)} ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
+  const xrayCandidates: SerperSearch[] = groups.map((targetCities) => ({
+    query: `site:linkedin.com/in ${naturalSearchTerm(titles[0] || input.title)} ${xrayKeywordGroups.join(" ")} ${geographicQuery(input, targetCities)}`.replace(/\s+/g, " ").trim(),
     page: 1,
+    targetCities,
   }));
-  if (xray.length < 4) {
-    xray.push({
-      query: `site:linkedin.com/in ${naturalSearchTerm(titles[0])} ${xrayKeywordGroups.join(" ")} ${locations.map(naturalSearchTerm).join(" ")}`.replace(/\s+/g, " ").trim(),
-      page: 2,
+  const sharedCities = input.countrywide ? [] : input.cities.slice(0, 8);
+  for (const title of titles.slice(1)) {
+    if (xrayCandidates.length >= 4) break;
+    xrayCandidates.push({
+      query: `site:linkedin.com/in ${naturalSearchTerm(title)} ${xrayKeywordGroups.join(" ")} ${geographicQuery(input, sharedCities)}`.replace(/\s+/g, " ").trim(),
+      page: 1,
+      targetCities: sharedCities,
     });
   }
+  const seen = new Set<string>();
+  const xray = xrayCandidates.filter((item) => {
+    const key = `${item.query.toLowerCase()}|${item.page}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 4);
+  const natural = xray.map((item) => ({
+    ...item,
+    query: `${linkedinProfileHint} ${item.query.replace(/^site:linkedin\.com\/in\s+/i, "")}`,
+  }));
+  const primaryQuery = natural[0]?.query || [linkedinProfileHint, titles[0], ...requiredNaturalTerms, getCountryProfile(input.countryCode).name]
+    .filter(Boolean)
+    .join(" ");
 
   return {
     xray,
     natural,
-    naturalFallback: { query: primaryQuery, page: 2 } satisfies SerperSearch,
+    naturalFallback: { query: primaryQuery, page: 2, targetCities: natural[0]?.targetCities || [] } satisfies SerperSearch,
   };
 }
 
-async function callSerper(apiKey: string, query: string, num = 10, page = 1) {
+async function callSerper(apiKey: string, query: string, num = 10, page = 1, countryCode = "BR") {
+  const profile = getCountryProfile(countryCode);
   const response = await fetch("https://google.serper.dev/search", {
     method: "POST",
     headers: {
@@ -513,7 +584,7 @@ async function callSerper(apiKey: string, query: string, num = 10, page = 1) {
       "Content-Type": "application/json",
       "X-API-KEY": apiKey,
     },
-    body: JSON.stringify({ q: query, gl: "br", hl: "pt-br", num, page }),
+    body: JSON.stringify({ q: query, gl: profile.code.toLowerCase(), hl: profile.searchLanguage, num, page }),
     cache: "no-store",
   });
   const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
@@ -524,14 +595,14 @@ async function callSerper(apiKey: string, query: string, num = 10, page = 1) {
 async function searchSerper(apiKey: string, input: TalentSearchInput) {
   const plan = searchQueries(input);
   const maxCandidates = Math.min(20, Math.max(1, Math.trunc(input.maxCandidates || 20)));
-  const parsePayloads = (payloads: Array<Record<string, unknown> | null>) => payloads.flatMap((payload, payloadIndex) => {
+  const parsePayload = (payload: Record<string, unknown> | null, search: SerperSearch, payloadIndex = 0) => {
     const organic = Array.isArray(payload?.organic)
       ? payload.organic as Array<Record<string, unknown>>
       : [];
     return organic
-      .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, input))
+      .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, input, search.targetCities))
       .filter((candidate): candidate is TalentCandidate => Boolean(candidate));
-  });
+  };
   let queries = 0;
   let candidates: TalentCandidate[] = [];
   let firstError: Error | null = null;
@@ -542,10 +613,10 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
       if (candidates.length >= maxCandidates || queries >= 4) break;
       const remaining = maxCandidates - candidates.length;
       try {
-        const payload = await callSerper(apiKey, item.query, Math.min(10, remaining), item.page);
+        const payload = await callSerper(apiKey, item.query, Math.min(10, remaining), item.page, input.countryCode);
         queries += 1;
         successful += 1;
-        candidates = deduplicate([...candidates, ...parsePayloads([payload])]).slice(0, maxCandidates);
+        candidates = deduplicate([...candidates, ...parsePayload(payload, item, queries)]).slice(0, maxCandidates);
       } catch (error) {
         if (!firstError && error instanceof Error) firstError = error;
       }
@@ -566,9 +637,9 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
   if (candidates.length < fallbackThreshold && candidates.length < maxCandidates && queries < 4) {
     try {
       const remaining = maxCandidates - candidates.length;
-      const fallbackPayload = await callSerper(apiKey, plan.naturalFallback.query, Math.min(10, remaining), plan.naturalFallback.page);
+      const fallbackPayload = await callSerper(apiKey, plan.naturalFallback.query, Math.min(10, remaining), plan.naturalFallback.page, input.countryCode);
       queries += 1;
-      candidates = deduplicate([...candidates, ...parsePayloads([fallbackPayload])]).slice(0, maxCandidates);
+      candidates = deduplicate([...candidates, ...parsePayload(fallbackPayload, plan.naturalFallback, queries)]).slice(0, maxCandidates);
     } catch {
       // A busca principal continua válida mesmo quando a página adicional falha.
     }
@@ -625,6 +696,10 @@ export async function searchTalentSources(input: TalentSearchInput) {
     const result = await searchSerper(saved.value, input);
     const candidates = result.candidates;
     const requiredCount = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts).length;
+    const profile = getCountryProfile(input.countryCode);
+    const scope = input.countrywide
+      ? `todo o território de ${profile.name}`
+      : `${input.cities.length} cidade(s) em ${[input.subdivision, profile.name].filter(Boolean).join(" · ")}`;
     return {
       candidates,
       providers: [{
@@ -633,7 +708,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
         status: "success" as const,
         count: candidates.length,
         queries: result.queries,
-        message: `${PROVIDER.label} executou ${result.queries} consulta(s) adaptativa(s) e retornou ${candidates.length} de até ${input.maxCandidates} perfil(is) público(s) do LinkedIn${requiredCount ? ` com ${requiredCount} palavra(s)-chave obrigatória(s) validada(s)` : ""}.`,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) geográfica(s) para ${scope} e retornou ${candidates.length} de até ${input.maxCandidates} perfil(is) público(s) do LinkedIn${requiredCount ? ` com ${requiredCount} palavra(s)-chave obrigatória(s) validada(s)` : ""}.`,
       }],
       configured: true,
     };
