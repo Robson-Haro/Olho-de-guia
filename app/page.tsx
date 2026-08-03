@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { COUNTRY_OPTIONS, findCountryCode, geographicLocationLabel, getCountryProfile } from "@/lib/geography";
 import {
   Bird,
   BriefcaseBusiness,
@@ -29,6 +30,9 @@ type ImportedJob = {
   code: string;
   title: string;
   city: string;
+  state: string;
+  country: string;
+  countryCode: string;
   description: string;
   responsibilities: string;
   prerequisites: string;
@@ -50,6 +54,7 @@ type Candidate = {
   title: string;
   city: string;
   state: string;
+  country: string;
   profileUrl?: string;
   company?: string;
   source?: string;
@@ -65,6 +70,20 @@ type Candidate = {
   evidenceConfidence?: number;
   evidenceLabel?: string;
   rankingEngine?: string;
+  geographicMatch?: "city" | "subdivision" | "country" | "targeted" | "unknown";
+  geographicLabel?: string;
+  searchedLocations?: string[];
+};
+
+type JobForm = {
+  title: string;
+  countryCode: string;
+  subdivision: string;
+  cityCount: number;
+  cities: string[];
+  description: string;
+  keywords: string[];
+  countrywide: boolean;
 };
 
 type JobIntelligence = {
@@ -98,13 +117,6 @@ type IntegrationState = {
   message: string;
 };
 
-const brazilStates = [
-  ["AC",1,3],["AM",2,2],["RR",3,1],["RO",3,3],["PA",4,2],["AP",5,1],["TO",5,3],
-  ["MA",6,2],["PI",7,3],["CE",8,2],["RN",9,2],["PB",9,3],["PE",8,3],["AL",9,4],["SE",8,4],["BA",7,4],
-  ["MT",4,4],["MS",4,5],["GO",5,4],["DF",5,5],["MG",6,5],["ES",7,5],["RJ",7,6],["SP",6,6],
-  ["PR",5,7],["SC",5,8],["RS",4,9],
-] as const;
-
 const nav = [
   { icon: Home, label: "Visão geral" },
   { icon: BriefcaseBusiness, label: "Vagas" },
@@ -116,6 +128,7 @@ const nav = [
 ];
 
 const candidateLimitOptions = Array.from({ length: 20 }, (_, index) => index + 1);
+const cityCountOptions = Array.from({ length: 20 }, (_, index) => index + 1);
 
 export default function HomePage() {
   const [active, setActive] = useState("Visão geral"),
@@ -125,13 +138,15 @@ export default function HomePage() {
     [message, setMessage] = useState("");
   const [importedJob, setImportedJob] = useState<ImportedJob | null>(null);
   const [jobEntryMode, setJobEntryMode] = useState<"gupy" | "manual">("gupy");
-  const [jobForm, setJobForm] = useState({
+  const [jobForm, setJobForm] = useState<JobForm>({
     title: "",
-    city: "",
-    additionalCity: "",
+    countryCode: "BR",
+    subdivision: "",
+    cityCount: 1,
+    cities: [""],
     description: "",
     keywords: ["", "", "", ""],
-    nationwide: false,
+    countrywide: false,
   });
   const [searchStatus, setSearchStatus] = useState<"idle" | "working" | "completed" | "empty" | "error">("idle");
   const [searchMessage, setSearchMessage] = useState("");
@@ -142,7 +157,7 @@ export default function HomePage() {
   const [exportStatus, setExportStatus] = useState<"idle" | "working" | "error">("idle");
   const [exportMessage, setExportMessage] = useState("");
   const [providerResults, setProviderResults] = useState<ProviderSearchStatus[]>([]);
-  const [selectedState, setSelectedState] = useState("");
+  const [selectedSubdivision, setSelectedSubdivision] = useState("");
   const [selectedCity, setSelectedCity] = useState("");
   const [gupyToken, setGupyToken] = useState(""),
     [showToken, setShowToken] = useState(false),
@@ -156,6 +171,7 @@ export default function HomePage() {
   const [talentIntegration, setTalentIntegration] = useState<Record<"serper", IntegrationState>>({
     serper: { status: "idle", message: "" },
   });
+  const selectedCountryProfile = getCountryProfile(jobForm.countryCode);
   const highAdherenceCount = candidates.filter((candidate) => candidate.compatibility >= 70).length;
   const stats = [
     { label: "Perfis mapeados", value: String(candidates.length), icon: UsersRound },
@@ -187,10 +203,15 @@ export default function HomePage() {
       if (!response.ok)
         throw new Error(data.error || "Não foi possível importar a vaga.");
       setImportedJob(data.job);
+      const importedCountryCode = findCountryCode(data.job.countryCode || data.job.country, "BR");
       setJobForm((current) => ({
         ...current,
         title: data.job.title || "",
-        city: data.job.city || "",
+        countryCode: importedCountryCode,
+        subdivision: data.job.state || "",
+        cityCount: 1,
+        cities: [data.job.city || ""],
+        countrywide: false,
         description: [
           data.job.description,
           data.job.responsibilities,
@@ -271,9 +292,33 @@ export default function HomePage() {
       keywords: current.keywords.map((keyword, keywordIndex) => keywordIndex === index ? value : keyword),
     }));
   }
+  function updateCity(index: number, value: string) {
+    setJobForm((current) => ({
+      ...current,
+      cities: current.cities.map((city, cityIndex) => cityIndex === index ? value : city),
+    }));
+  }
+  function updateCityCount(value: number) {
+    const cityCount = Math.min(20, Math.max(1, value));
+    setJobForm((current) => ({
+      ...current,
+      cityCount,
+      cities: Array.from({ length: cityCount }, (_, index) => current.cities[index] || ""),
+    }));
+  }
+  function changeCountry(countryCode: string) {
+    setJobForm((current) => ({
+      ...current,
+      countryCode,
+      subdivision: "",
+      cityCount: 1,
+      cities: [""],
+      countrywide: false,
+    }));
+  }
   function prepareManualJob() {
     setImportedJob(null);
-    setJobForm({ title: "", city: "", additionalCity: "", description: "", keywords: ["", "", "", ""], nationwide: false });
+    setJobForm({ title: "", countryCode: "BR", subdivision: "", cityCount: 1, cities: [""], description: "", keywords: ["", "", "", ""], countrywide: false });
     setMessage("Preencha os dados abaixo e inicie a busca.");
     setSearchStatus("idle");
     setSearchStrategies([]);
@@ -283,19 +328,28 @@ export default function HomePage() {
   }
 
   async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = []) {
+    const profile = getCountryProfile(job.countryCode);
+    const normalizedJob = {
+      ...job,
+      country: profile.name,
+      city: job.cities[0] || "",
+      additionalCity: job.cities.slice(1).join(", "),
+      nationwide: job.countrywide,
+    };
     const response = await fetch("/svc/intelligence/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job, candidates: profiles }),
+      body: JSON.stringify({ job: normalizedJob, candidates: profiles }),
     });
     if (!response.ok) throw new Error("Motor Python temporariamente indisponível.");
     return response.json();
   }
 
   async function startSearch() {
-    if (!jobForm.title.trim() || !jobForm.description.trim() || (!jobForm.nationwide && !jobForm.city.trim())) {
+    const selectedCities = jobForm.cities.map((city) => city.trim()).filter(Boolean);
+    if (!jobForm.title.trim() || !jobForm.description.trim() || (!jobForm.countrywide && !selectedCities.length)) {
       setSearchStatus("error");
-      setSearchMessage("Preencha o título, a descrição e a cidade antes de buscar.");
+      setSearchMessage("Preencha o título, a descrição, o país e ao menos uma cidade antes de buscar.");
       return;
     }
     setSearchStatus("working");
@@ -306,7 +360,11 @@ export default function HomePage() {
     setPythonRankingActive(false);
     setExportMessage("");
     try {
-      let enrichedSearch = { ...jobForm } as typeof jobForm & {
+      let enrichedSearch = {
+        ...jobForm,
+        country: selectedCountryProfile.name,
+        cities: selectedCities,
+      } as typeof jobForm & { country: string } & {
         titleVariants?: string[];
         semanticKeywords?: string[];
         requiredKeywordConcepts?: Array<{ label: string; aliases: string[] }>;
@@ -320,6 +378,8 @@ export default function HomePage() {
         setJobIntelligence(intelligence);
         enrichedSearch = {
           ...jobForm,
+          country: selectedCountryProfile.name,
+          cities: selectedCities,
           titleVariants: intelligence?.equivalentTitles || [],
           semanticKeywords: intelligence?.skills || [],
           requiredKeywordConcepts: intelligence?.requiredKeywords || [],
@@ -363,7 +423,7 @@ export default function HomePage() {
       const requiredKeywordCount = resolvedJobIntelligence?.requiredKeywords?.length
         ?? jobForm.keywords.filter((keyword) => keyword.trim()).length;
       setCandidates(limitedCandidates);
-      setSelectedState("");
+      setSelectedSubdivision(limitedCandidates[0]?.state || (limitedCandidates.length ? "Região não identificada" : ""));
       setSelectedCity("");
       setSearchStatus(limitedCandidates.length ? "completed" : "empty");
       setSearchMessage(limitedCandidates.length
@@ -371,7 +431,7 @@ export default function HomePage() {
         : requiredKeywordCount
           ? `A busca executou ${queriesUsed} consulta(s), mas nenhum perfil apresentou evidência pública de todas as palavras-chave obrigatórias. Revise os termos ou amplie a localização.`
           : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
-      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
+      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, country: selectedCountryProfile.name, cities: selectedCities, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
       setSearchMessage(error instanceof Error ? error.message : "Erro ao iniciar busca.");
@@ -406,18 +466,20 @@ export default function HomePage() {
       setExportMessage(error instanceof Error ? error.message : "Falha ao baixar a planilha.");
     }
   }
-  const stateTotals = candidates.reduce<Record<string, number>>((totals, candidate) => {
-    totals[candidate.state] = (totals[candidate.state] || 0) + 1;
+  const subdivisionTotals = candidates.reduce<Record<string, number>>((totals, candidate) => {
+    const subdivision = candidate.state || "Região não identificada";
+    totals[subdivision] = (totals[subdivision] || 0) + 1;
     return totals;
   }, {});
-  const selectedStateCandidates = candidates.filter((candidate) => candidate.state === selectedState);
-  const cityTotals = selectedStateCandidates.reduce<Record<string, number>>((totals, candidate) => {
-    totals[candidate.city] = (totals[candidate.city] || 0) + 1;
+  const selectedSubdivisionCandidates = candidates.filter((candidate) => (candidate.state || "Região não identificada") === selectedSubdivision);
+  const cityTotals = selectedSubdivisionCandidates.reduce<Record<string, number>>((totals, candidate) => {
+    const city = candidate.city || "Cidade não identificada";
+    totals[city] = (totals[city] || 0) + 1;
     return totals;
   }, {});
   const visibleCandidates = selectedCity
-    ? selectedStateCandidates.filter((candidate) => candidate.city === selectedCity)
-    : selectedStateCandidates;
+    ? selectedSubdivisionCandidates.filter((candidate) => (candidate.city || "Cidade não identificada") === selectedCity)
+    : selectedSubdivisionCandidates;
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -747,9 +809,46 @@ export default function HomePage() {
                     {jobForm.keywords.map((keyword, index) => <input key={index} value={keyword} onChange={(e) => updateKeyword(index, e.target.value)} placeholder={`Palavra-chave ${index + 1}`} />)}
                     <small className="keywordHint">Cada campo preenchido funciona como critério obrigatório. O Eureka aceita equivalentes em português, inglês e espanhol.</small>
                   </fieldset>
-                  <label><span>Cidade da vaga *</span><input value={jobForm.city} onChange={(e) => setJobForm({ ...jobForm, city: e.target.value })} placeholder="Cidade importada ou principal" /></label>
-                  <label><span>Acrescentar outra cidade</span><input value={jobForm.additionalCity} onChange={(e) => setJobForm({ ...jobForm, additionalCity: e.target.value })} placeholder="Opcional: região ou cidade adicional" /></label>
-                  <label className="full nationwideToggle"><input type="checkbox" checked={jobForm.nationwide} onChange={(e) => setJobForm({ ...jobForm, nationwide: e.target.checked })} /><span><strong>Brasil inteiro — todas as cidades</strong><small>Use esta opção para mapear profissionais em qualquer localidade do país.</small></span></label>
+                  <section className="full geographyBuilder" aria-labelledby="geography-title">
+                    <div className="geographyHeader">
+                      <div>
+                        <span className="kicker">INTELIGÊNCIA GEOGRÁFICA</span>
+                        <h4 id="geography-title">Onde o Eureka deve procurar?</h4>
+                      </div>
+                      <MapPinned size={27} />
+                    </div>
+                    <div className="geographyControls">
+                      <label>
+                        <span>País *</span>
+                        <select value={jobForm.countryCode} onChange={(event) => changeCountry(event.target.value)} aria-label="País da busca">
+                          {COUNTRY_OPTIONS.map((country) => <option key={country.code} value={country.code}>{country.name}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        <span>{selectedCountryProfile.subdivisionLabel}</span>
+                        <input value={jobForm.subdivision} onChange={(event) => setJobForm({ ...jobForm, subdivision: event.target.value })} placeholder={`Ex.: ${selectedCountryProfile.subdivisionLabel}`} disabled={jobForm.countrywide} />
+                      </label>
+                      <label className="cityQuantityField">
+                        <span>Quantidade de cidades</span>
+                        <select value={jobForm.cityCount} onChange={(event) => updateCityCount(Number(event.target.value))} disabled={jobForm.countrywide} aria-label="Quantidade de cidades da busca">
+                          {cityCountOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    {!jobForm.countrywide && <div className="cityFieldsGrid">
+                      {jobForm.cities.map((city, index) => (
+                        <label key={index}>
+                          <span>Cidade {index + 1} {index === 0 ? "*" : ""}</span>
+                          <input value={city} onChange={(event) => updateCity(index, event.target.value)} placeholder={index === 0 ? "Cidade principal ou importada" : `Nome da cidade ${index + 1}`} />
+                        </label>
+                      ))}
+                    </div>}
+                    <label className="countrywideToggle">
+                      <input type="checkbox" checked={jobForm.countrywide} onChange={(event) => setJobForm({ ...jobForm, countrywide: event.target.checked })} />
+                      <span><strong>Todo o país — todas as cidades</strong><small>Mapear profissionais em qualquer localidade de {selectedCountryProfile.name}.</small></span>
+                    </label>
+                    <div className="geographyScope"><MapPinned size={18} /><span><strong>Área selecionada:</strong> {geographicLocationLabel(jobForm) || selectedCountryProfile.name}</span></div>
+                  </section>
                   <button className={`primary full searchButton ${searchStatus === "completed" ? "activated" : ""} ${searchStatus === "empty" ? "finishedEmpty" : ""}`} onClick={startSearch} disabled={searchStatus === "working"}>
                     {searchStatus === "completed" ? <CheckCircle2 size={21} /> : <Crosshair size={21} />}
                     {searchStatus === "working" ? "BUSCANDO TALENTOS..." : searchStatus === "completed" ? `BUSCA CONCLUÍDA · ${candidates.length} PERFIS` : searchStatus === "empty" ? "BUSCA FINALIZADA · 0 PERFIS" : "INICIAR BUSCA DE TALENTOS"}
@@ -811,7 +910,10 @@ export default function HomePage() {
                           </td>
                           <td>{candidate.title || "Não identificado"}</td>
                           <td>{candidate.company || "Não identificada"}</td>
-                          <td>{[candidate.city, candidate.state].filter(Boolean).join("/") || "Não identificada"}</td>
+                          <td>
+                            {[candidate.city, candidate.state, candidate.country].filter(Boolean).join(" · ") || "Não identificada"}
+                            {candidate.geographicLabel && <small className="geoEvidence">{candidate.geographicLabel}</small>}
+                          </td>
                           <td>
                             <a className="linkedinButton" href={candidate.profileUrl} target="_blank" rel="noreferrer">
                               ABRIR PERFIL <ChevronRight size={15} />
@@ -833,17 +935,24 @@ export default function HomePage() {
             </section>
             {candidates.length > 0 && (
               <section className="glass geoPanel">
-                <div className="sectionTitle"><div><span className="kicker">INTELIGÊNCIA GEOGRÁFICA</span><h3>Mapa de talentos no Brasil</h3><p>{candidates.length ? `${candidates.length} perfis distribuídos por estado e cidade.` : "O mapa será preenchido quando uma fonte de perfis retornar candidatos reais."}</p></div><MapPinned size={30} /></div>
+                <div className="sectionTitle"><div><span className="kicker">INTELIGÊNCIA GEOGRÁFICA</span><h3>Mapa hierárquico de talentos</h3><p>{candidates.length} perfis organizados por país, {selectedCountryProfile.subdivisionLabel.toLowerCase()} e cidade.</p></div><MapPinned size={30} /></div>
+                <div className="geographyTargetBar">
+                  <div className="countryIdentity"><MapPinned size={25}/><span><small>PAÍS DA BUSCA</small><strong>{selectedCountryProfile.name}</strong></span><b>{jobForm.countryCode}</b></div>
+                  <div className="targetLocations"><small>LOCALIDADES PESQUISADAS</small><div>{jobForm.countrywide ? <span>Todo o país</span> : jobForm.cities.filter(Boolean).map((city) => <span key={city}>{city}</span>)}</div></div>
+                </div>
                 <div className="geoGrid">
-                  <div className="brazilMap" aria-label="Mapa interativo do Brasil">
-                    {brazilStates.map(([state, column, row]) => {
-                      const total = stateTotals[state] || 0;
-                      const percentage = candidates.length ? Math.round((total / candidates.length) * 100) : 0;
-                      return <button key={state} style={{gridColumn: column, gridRow: row}} className={`${total ? "hasTalent" : ""} ${selectedState === state ? "selected" : ""}`} onClick={() => { setSelectedState(state); setSelectedCity(""); }} title={`${state}: ${total} perfis (${percentage}%)`}><strong>{state}</strong>{total > 0 && <span>{total}<small>{percentage}%</small></span>}</button>;
-                    })}
+                  <div className="subdivisionPanel" aria-label={`Perfis por ${selectedCountryProfile.subdivisionLabel.toLowerCase()}`}>
+                    <h4>{selectedCountryProfile.subdivisionLabel}</h4>
+                    <p>Selecione uma região para abrir suas cidades e profissionais.</p>
+                    <div className="subdivisionList">
+                      {Object.entries(subdivisionTotals).sort((a, b) => b[1] - a[1]).map(([subdivision, total]) => {
+                        const percentage = candidates.length ? Math.round((total / candidates.length) * 100) : 0;
+                        return <button key={subdivision} className={selectedSubdivision === subdivision ? "selected" : ""} onClick={() => { setSelectedSubdivision(subdivision); setSelectedCity(""); }}><span><strong>{subdivision}</strong><small>{percentage}% dos perfis</small></span><b>{total}</b></button>;
+                      })}
+                    </div>
                   </div>
                   <div className="geoDetails">
-                    {!selectedState ? <div className="emptyState"><MapPinned size={38}/><strong>Selecione um estado</strong><span>Clique no mapa para abrir as cidades e os perfis encontrados.</span></div> : <><h4>{selectedState} · {selectedStateCandidates.length} perfis</h4><div className="cityChips">{Object.entries(cityTotals).map(([city,total]) => <button key={city} className={selectedCity === city ? "active" : ""} onClick={() => setSelectedCity(city)}>{city}<span>{total}</span></button>)}</div>{!selectedStateCandidates.length ? <div className="emptyState compact"><UsersRound size={32}/><strong>Nenhum perfil real neste estado</strong><span>Não serão exibidos dados fictícios.</span></div> : <div className="profileList">{visibleCandidates.map((candidate) => <a key={candidate.id} href={candidate.profileUrl || "#"} target={candidate.profileUrl ? "_blank" : undefined} rel="noreferrer"><CircleUserRound size={30}/><span><strong>{candidate.name}</strong><small>{candidate.title} · {candidate.city}/{candidate.state}</small></span><ChevronRight size={18}/></a>)}</div>}</>}
+                    {!selectedSubdivision ? <div className="emptyState"><MapPinned size={38}/><strong>Selecione uma região</strong><span>Abra as cidades e os perfis encontrados sem misturar países.</span></div> : <><h4>{selectedSubdivision} · {selectedSubdivisionCandidates.length} perfis</h4><div className="cityChips">{Object.entries(cityTotals).sort((a, b) => b[1] - a[1]).map(([city,total]) => <button key={city} className={selectedCity === city ? "active" : ""} onClick={() => setSelectedCity(city)}>{city}<span>{total}</span></button>)}</div>{!selectedSubdivisionCandidates.length ? <div className="emptyState compact"><UsersRound size={32}/><strong>Nenhum perfil real nesta região</strong><span>Não serão exibidos dados fictícios.</span></div> : <div className="profileList">{visibleCandidates.map((candidate) => <a key={candidate.id} href={candidate.profileUrl || "#"} target={candidate.profileUrl ? "_blank" : undefined} rel="noreferrer"><CircleUserRound size={30}/><span><strong>{candidate.name}</strong><small>{candidate.title} · {[candidate.city, candidate.state, candidate.country].filter(Boolean).join(" · ") || "localidade a confirmar"}</small></span><ChevronRight size={18}/></a>)}</div>}</>}
                   </div>
                 </div>
               </section>

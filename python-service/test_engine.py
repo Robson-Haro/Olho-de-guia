@@ -112,6 +112,60 @@ class TalentEngineTests(unittest.TestCase):
         self.assertNotIn("pcd", normalized_skills)
         self.assertNotIn("gênero", normalized_skills)
 
+    def test_multicity_geography_prioritizes_selected_city_and_country(self):
+        job = {
+            **self.job,
+            "countryCode": "MX",
+            "country": "México",
+            "subdivision": "Nuevo León",
+            "cities": ["Monterrey", "Guadalupe"],
+            "countrywide": False,
+            "nationwide": False,
+        }
+        candidates = [
+            {
+                "id": "1", "name": "María", "title": "Payroll Analyst",
+                "summary": "Payroll, Excel and labor law in Monterrey, Nuevo León, México",
+                "city": "Monterrey", "state": "Nuevo León", "country": "México",
+                "profileUrl": "https://www.linkedin.com/in/maria",
+            },
+            {
+                "id": "2", "name": "Laura", "title": "Payroll Analyst",
+                "summary": "Payroll, Excel and labor law in Bogotá, Colombia",
+                "city": "Bogotá", "state": "Bogotá D.C.", "country": "Colombia",
+                "profileUrl": "https://www.linkedin.com/in/laura",
+            },
+        ]
+        _, ranked = rank_candidates(job, candidates)
+        self.assertEqual("María", ranked[0]["name"])
+        self.assertIn("cidade selecionada confirmada", ranked[0]["matchReason"])
+
+    def test_countrywide_search_requires_public_country_evidence_for_full_location_score(self):
+        job = {
+            **self.job,
+            "countryCode": "MX",
+            "country": "México",
+            "subdivision": "",
+            "cities": [],
+            "countrywide": True,
+            "nationwide": True,
+        }
+        candidates = [
+            {
+                "id": "1", "name": "México", "title": "Payroll Analyst",
+                "summary": "Payroll and Excel in México", "country": "México",
+                "profileUrl": "https://www.linkedin.com/in/mexico",
+            },
+            {
+                "id": "2", "name": "Outro país", "title": "Payroll Analyst",
+                "summary": "Payroll and Excel", "country": "",
+                "profileUrl": "https://www.linkedin.com/in/outro",
+            },
+        ]
+        _, ranked = rank_candidates(job, candidates)
+        self.assertEqual("México", ranked[0]["name"])
+        self.assertGreater(ranked[0]["compatibility"], ranked[1]["compatibility"])
+
     def test_export_creates_real_xlsx_with_hyperlink(self):
         _, ranked = rank_candidates(self.job, [{
             "id": "1", "name": "Ana", "title": "Payroll Analyst", "summary": "Payroll and Excel",

@@ -25,6 +25,7 @@ HEADERS = [
     "Resumo público",
     "LinkedIn",
     "Fonte",
+    "País",
 ]
 
 
@@ -41,7 +42,7 @@ def create_candidate_workbook(job: dict[str, Any], candidates: Iterable[dict[str
     sheet = workbook.active
     sheet.title = "Candidatos"
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:M1"
+    sheet.auto_filter.ref = f"A1:N1"
 
     header_fill = PatternFill("solid", fgColor="07152B")
     accent_fill = PatternFill("solid", fgColor="006EB8")
@@ -73,6 +74,7 @@ def create_candidate_workbook(job: dict[str, Any], candidates: Iterable[dict[str
             candidate.get("summary") or "",
             candidate.get("profileUrl") or "",
             candidate.get("source") or "Google via Serper",
+            candidate.get("country") or "",
         ]
         for column, value in enumerate(values, start=1):
             cell = sheet.cell(row=row_index, column=column, value=safe_cell_value(value))
@@ -84,16 +86,18 @@ def create_candidate_workbook(job: dict[str, Any], candidates: Iterable[dict[str
             link_cell.hyperlink = link
             link_cell.font = link_font
 
-    widths = [10, 12, 22, 28, 32, 25, 20, 10, 34, 54, 58, 45, 20]
+    widths = [10, 12, 22, 28, 32, 25, 20, 16, 34, 54, 58, 45, 20, 20]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
 
     details = workbook.create_sheet("Detalhes da busca")
     details.append(["Campo", "Informação"])
     details.append(["Vaga", safe_cell_value(job.get("title") or "")])
-    details.append(["Cidade principal", safe_cell_value(job.get("city") or "Brasil inteiro")])
-    details.append(["Cidade adicional", safe_cell_value(job.get("additionalCity") or "")])
-    details.append(["Busca nacional", "Sim" if job.get("nationwide") is True else "Não"])
+    details.append(["País", safe_cell_value(job.get("country") or "")])
+    details.append(["Estado/província/região", safe_cell_value(job.get("subdivision") or "")])
+    cities = job.get("cities") if isinstance(job.get("cities"), list) else []
+    details.append(["Cidades", safe_cell_value(", ".join(str(city) for city in cities) or job.get("city") or "Todo o país")])
+    details.append(["Todo o país", "Sim" if job.get("countrywide") is True or job.get("nationwide") is True else "Não"])
     details.append(["Descrição da vaga", safe_cell_value(job.get("description") or "")])
     details.append(["Gerado em UTC", datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")])
     details.append(["Critério", "Ranking profissional explicável; decisão final deve ser humana."])

@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { searchTalentSources } from "@/lib/talent-sources";
+import { geographicLocationLabel, getCountryProfile } from "@/lib/geography";
 
 type SearchRequest = {
   title?: string;
   titleVariants?: string[];
+  countryCode?: string;
+  subdivision?: string;
+  cities?: string[];
+  countrywide?: boolean;
+  // Compatibilidade com pesquisas salvas antes da inteligência internacional.
   city?: string;
   additionalCity?: string;
   description?: string;
@@ -18,16 +24,25 @@ function clean(value: unknown, limit = 500) {
   return typeof value === "string" ? value.trim().slice(0, limit) : "";
 }
 
-function manualStrategies(title: string, city: string, additionalCity: string, keywords: string[], nationwide: boolean) {
-  const locations = nationwide
-    ? '"Brasil" OR "Brazil"'
-    : [city, additionalCity].filter(Boolean).map((item) => `"${item}"`).join(" OR ");
+function manualStrategies(
+  title: string,
+  geography: { countryCode: string; subdivision: string; cities: string[]; countrywide: boolean },
+  keywords: string[],
+) {
+  const profile = getCountryProfile(geography.countryCode);
+  const countryTerms = profile.aliases.map((item) => `"${item}"`).join(" OR ");
+  const cityTerms = geography.cities.map((item) => `"${item}"`).join(" OR ");
+  const locations = geography.countrywide
+    ? `(${countryTerms})`
+    : [cityTerms ? `(${cityTerms})` : "", geography.subdivision ? `"${geography.subdivision}"` : "", `(${countryTerms})`]
+        .filter(Boolean)
+        .join(" AND ");
   const skills = keywords.map((item) => `"${item}"`).join(" AND ");
   const base = [`"${title}"`, skills, `(${locations})`].filter(Boolean).join(" AND ");
   return [
     { label: "LinkedIn via Google — pesquisa manual", query: `site:linkedin.com/in/ ${base}` },
     { label: "Currículos públicos — pesquisa manual", query: `${base} (currículo OR resume OR perfil profissional)` },
-    { label: "LinkedIn Brasil — pesquisa manual", query: `site:br.linkedin.com/in/ "${title}" (${locations}) ${skills}` },
+    { label: `LinkedIn ${profile.name} — pesquisa manual`, query: `site:linkedin.com/in/ "${title}" (${locations}) ${skills}` },
   ].map(({ label, query }) => ({
     label,
     query,
@@ -39,10 +54,15 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as SearchRequest;
     const title = clean(body.title, 150);
-    const city = clean(body.city, 100);
-    const additionalCity = clean(body.additionalCity, 100);
+    const countryCode = clean(body.countryCode, 2).toUpperCase() || "BR";
+    const country = getCountryProfile(countryCode).name;
+    const subdivision = clean(body.subdivision, 120);
+    const legacyCities = [clean(body.city, 100), clean(body.additionalCity, 100)].filter(Boolean);
+    const cities = Array.isArray(body.cities)
+      ? [...new Set(body.cities.map((item) => clean(item, 100)).filter(Boolean))].slice(0, 20)
+      : legacyCities;
     const description = clean(body.description, 10000);
-    const nationwide = body.nationwide === true;
+    const countrywide = body.countrywide === true || body.nationwide === true;
     const requestedMaximum = Number(body.maxCandidates);
     const maxCandidates = Number.isFinite(requestedMaximum)
       ? Math.min(20, Math.max(1, Math.trunc(requestedMaximum)))
@@ -64,24 +84,27 @@ export async function POST(request: Request) {
             : [],
         })).filter((concept) => concept.label && concept.aliases.length).slice(0, 12)
       : [];
-    if (!title || !description || (!nationwide && !city)) {
+    if (!title || !description || (!countrywide && !cities.length)) {
       return NextResponse.json(
-        { error: "Título, descrição e cidade são obrigatórios, exceto em buscas para todo o Brasil." },
+        { error: "Título, descrição, país e ao menos uma cidade são obrigatórios, exceto em buscas para todo o país." },
         { status: 400 },
       );
     }
 
-    const strategies = manualStrategies(title, city, additionalCity, keywords, nationwide);
+    const geography = { countryCode, subdivision, cities, countrywide };
+    const strategies = manualStrategies(title, geography, keywords);
     const result = await searchTalentSources({
       title,
       titleVariants,
-      city,
-      additionalCity,
+      countryCode,
+      country,
+      subdivision,
+      cities,
       description,
       keywords,
       semanticKeywords,
       requiredKeywordConcepts,
-      nationwide,
+      countrywide,
       maxCandidates,
     });
 
@@ -113,6 +136,11 @@ export async function POST(request: Request) {
       completed: true,
       candidates: result.candidates,
       total: result.candidates.length,
+      geography: {
+        ...geography,
+        country,
+        label: geographicLocationLabel(geography),
+      },
       providers: result.providers,
       strategies,
     });

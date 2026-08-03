@@ -552,13 +552,27 @@ def level_alignment(job_level: str | None, candidate_level: str | None) -> tuple
     return 0.0, "senioridade distante da vaga"
 
 
-def location_alignment(job: dict[str, Any], candidate_text: str) -> tuple[float, str]:
-    if job.get("nationwide") is True:
-        return 10.0, "busca nacional"
-    requested = unique([str(job.get("city") or ""), str(job.get("additionalCity") or "")])
+def location_alignment(job: dict[str, Any], candidate: dict[str, Any], candidate_text: str) -> tuple[float, str]:
+    requested_cities = job.get("cities") if isinstance(job.get("cities"), list) else []
+    requested = unique([
+        *(str(city) for city in requested_cities),
+        str(job.get("city") or ""),
+        str(job.get("additionalCity") or ""),
+    ])
+    subdivision = str(job.get("subdivision") or "")
+    country = str(job.get("country") or "")
     normalized = normalize(candidate_text)
     if any(phrase_in(normalized, location) for location in requested):
-        return 10.0, "localidade compatível"
+        return 10.0, "cidade selecionada confirmada"
+    if subdivision and phrase_in(normalized, subdivision):
+        return 8.0, "região selecionada confirmada"
+    if country and phrase_in(normalized, country):
+        return 6.0, "país selecionado confirmado"
+    geographic_match = str(candidate.get("geographicMatch") or "")
+    if geographic_match == "targeted":
+        return 2.0, "consulta direcionada; localidade a confirmar no perfil"
+    if job.get("countrywide") is True or job.get("nationwide") is True:
+        return 0.0, "país não confirmado no trecho público"
     return 0.0, "localidade não confirmada"
 
 
@@ -575,7 +589,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     title = str(candidate.get("title") or "")
     candidate_text = " ".join(
         str(candidate.get(field) or "")
-        for field in ("title", "summary", "company", "city", "state")
+        for field in ("title", "summary", "company", "city", "state", "country", "geographicLabel")
     )
     candidate_family = detect_family(title, candidate_text)
     candidate_level = detect_level(title)
@@ -596,7 +610,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     skill_denominator = min(max(len(intelligence.skills), 1), 6)
     skill_score = min(30.0, (len(matches) / skill_denominator) * 30.0)
     seniority_score, seniority_reason = level_alignment(intelligence.level, candidate_level)
-    location_score, location_reason = location_alignment(job, candidate_text)
+    location_score, location_reason = location_alignment(job, candidate, candidate_text)
     compatibility = round(min(100.0, role_score + skill_score + seniority_score + location_score))
     confidence, confidence_label = evidence_confidence(candidate_text)
 

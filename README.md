@@ -22,6 +22,16 @@ Copie `.env.example` para `.env.local` e configure Supabase, e-mail administrado
 
 O backend monta uma pesquisa natural compatível com contas gratuitas do Serper, aceita somente URLs públicas de perfis individuais do LinkedIn e remove duplicidades. Antes da pesquisa, o motor Python identifica cargos equivalentes em português, inglês e espanhol. Cada palavra-chave preenchida é tratada como critério obrigatório (AND), com equivalentes multilíngues quando disponíveis; perfis sem evidência pública de todos os conceitos informados são descartados antes de entrar no limite solicitado. Depois, o motor reordena os resultados por aderência profissional explicável: função, competências, senioridade e localização visíveis no resultado público. O sistema não faz scraping do LinkedIn e não usa enriquecimento do Apollo.
 
+### Inteligência geográfica internacional
+
+- seleção de qualquer país da lista ISO, com idioma e mercado da consulta ajustados automaticamente;
+- nomenclatura regional adaptada ao país (estado, província, departamento, região ou cantão);
+- uma a vinte cidades por busca, abertas dinamicamente no formulário;
+- distribuição das cidades entre até quatro consultas geográficas, preservando o limite de consumo do Serper;
+- opção de busca em todo o país, sem manter o viés técnico fixo para o Brasil;
+- ranking geográfico por evidência pública de cidade, divisão administrativa e país;
+- painel de resultados universal por país → região → cidade, com localidades não confirmadas claramente sinalizadas.
+
 ## Motor Python multilíngue
 
 - FastAPI executado como serviço Python no mesmo projeto Vercel;
@@ -49,4 +59,5 @@ O Serper fornece título, URL e trecho público indexado pelo Google. Portanto, 
 - Tabela com nome, cargo, empresa, localização, aderência e link clicável
 - Motor Python com cargos equivalentes em três idiomas
 - Quantidade configurável de 1 a 20 candidatos, com interrupção automática da busca ao atingir o limite
+- Inteligência geográfica internacional com país, região e múltiplas cidades
 - Download da lista em Excel
