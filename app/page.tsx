@@ -73,6 +73,17 @@ type Candidate = {
   geographicMatch?: "city" | "subdivision" | "country" | "targeted" | "unknown";
   geographicLabel?: string;
   searchedLocations?: string[];
+  tier?: "A" | "B" | "C";
+  tierLabel?: string;
+  seniorityLabel?: string;
+  scoreBreakdown?: {
+    cargo: number;
+    senioridade: number;
+    competencias: number;
+    localidade: number;
+    ruido: number;
+    evidencia?: number;
+  };
 };
 
 type JobForm = {
@@ -103,6 +114,9 @@ type ProviderSearchStatus = {
   count: number;
   queries: number;
   message: string;
+  poolSize?: number;
+  elapsedMs?: number;
+  tiers?: { A: number; B: number; C: number };
 };
 
 type TalentSourceStatus = {
@@ -154,6 +168,7 @@ export default function HomePage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [jobIntelligence, setJobIntelligence] = useState<JobIntelligence | null>(null);
   const [pythonRankingActive, setPythonRankingActive] = useState(false);
+  const [pythonEvaluatedCount, setPythonEvaluatedCount] = useState(0);
   const [exportStatus, setExportStatus] = useState<"idle" | "working" | "error">("idle");
   const [exportMessage, setExportMessage] = useState("");
   const [providerResults, setProviderResults] = useState<ProviderSearchStatus[]>([]);
@@ -172,7 +187,7 @@ export default function HomePage() {
     serper: { status: "idle", message: "" },
   });
   const selectedCountryProfile = getCountryProfile(jobForm.countryCode);
-  const highAdherenceCount = candidates.filter((candidate) => candidate.compatibility >= 70).length;
+  const highAdherenceCount = candidates.filter((candidate) => candidate.compatibility >= 70 && candidate.tier !== "C").length;
   const stats = [
     { label: "Perfis mapeados", value: String(candidates.length), icon: UsersRound },
     { label: "Alta aderência", value: String(highAdherenceCount), icon: Target },
@@ -325,6 +340,7 @@ export default function HomePage() {
     setProviderResults([]);
     setJobIntelligence(null);
     setPythonRankingActive(false);
+    setPythonEvaluatedCount(0);
   }
 
   async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = []) {
@@ -358,6 +374,7 @@ export default function HomePage() {
     setCandidates([]);
     setJobIntelligence(null);
     setPythonRankingActive(false);
+    setPythonEvaluatedCount(0);
     setExportMessage("");
     try {
       let enrichedSearch = {
@@ -399,14 +416,20 @@ export default function HomePage() {
       setProviderResults(Array.isArray(data.providers) ? data.providers : []);
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
       const foundCandidates = Array.isArray(data.candidates) ? data.candidates as Candidate[] : [];
+      // O Python precisa reavaliar o conjunto amplo encontrado pelo Serper,
+      // e não somente os perfis que o TypeScript já colocaria na lista final.
+      const evaluationPool = Array.isArray(data.pool) && data.pool.length
+        ? (data.pool as Candidate[])
+        : foundCandidates;
       let rankedCandidates = foundCandidates;
-      if (foundCandidates.length && pythonPrepared) {
+      if (evaluationPool.length && pythonPrepared) {
         try {
-          setSearchMessage(`Reavaliando ${foundCandidates.length} perfis pelo motor Python multilíngue...`);
-          const rankingData = await requestPythonIntelligence(jobForm, foundCandidates);
+          setSearchMessage(`Reavaliando ${evaluationPool.length} perfis pelo motor Python multilíngue...`);
+          const rankingData = await requestPythonIntelligence(jobForm, evaluationPool);
           if (Array.isArray(rankingData.candidates)) {
             rankedCandidates = rankingData.candidates.slice(0, candidateLimit);
             setPythonRankingActive(true);
+            setPythonEvaluatedCount(evaluationPool.length);
             if (rankingData.jobIntelligence) {
               resolvedJobIntelligence = rankingData.jobIntelligence;
               setJobIntelligence(rankingData.jobIntelligence);
@@ -414,12 +437,14 @@ export default function HomePage() {
           }
         } catch {
           setPythonRankingActive(false);
+          setPythonEvaluatedCount(0);
         }
       }
       const queriesUsed = Array.isArray(data.providers)
         ? data.providers.reduce((total: number, provider: ProviderSearchStatus) => total + (Number(provider.queries) || 0), 0)
         : 0;
       const limitedCandidates = rankedCandidates.slice(0, candidateLimit);
+      const evaluatedProfiles = Math.max(Number(data.evaluated) || 0, evaluationPool.length);
       const requiredKeywordCount = resolvedJobIntelligence?.requiredKeywords?.length
         ?? jobForm.keywords.filter((keyword) => keyword.trim()).length;
       setCandidates(limitedCandidates);
@@ -427,9 +452,9 @@ export default function HomePage() {
       setSelectedCity("");
       setSearchStatus(limitedCandidates.length ? "completed" : "empty");
       setSearchMessage(limitedCandidates.length
-        ? `Busca concluída: ${limitedCandidates.length} de até ${candidateLimit} perfil(is) em ${queriesUsed} consulta(s) Serper${requiredKeywordCount ? `, com ${requiredKeywordCount} palavra(s)-chave obrigatória(s) validada(s)` : ""}${pythonPrepared ? ", cargos equivalentes em três idiomas" : ""}${limitedCandidates[0]?.rankingEngine ? " e ranking Python" : ""}.`
+        ? `Busca concluída: ${evaluatedProfiles} perfil(is) público(s) avaliados em ${queriesUsed} consulta(s) e ${limitedCandidates.length} selecionado(s)${requiredKeywordCount ? ` com ${requiredKeywordCount} critério(s) prioritário(s)` : ""}${pythonPrepared ? ", cargos equivalentes em três idiomas" : ""}${limitedCandidates[0]?.rankingEngine ? " e ranking Python confirmado" : ""}.`
         : requiredKeywordCount
-          ? `A busca executou ${queriesUsed} consulta(s), mas nenhum perfil apresentou evidência pública de todas as palavras-chave obrigatórias. Revise os termos ou amplie a localização.`
+          ? `A busca executou ${queriesUsed} consulta(s), mas não encontrou perfis públicos suficientes para classificar. Revise os critérios ou amplie a localização.`
           : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
       localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, country: selectedCountryProfile.name, cities: selectedCities, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
     } catch (error) {
@@ -673,7 +698,7 @@ export default function HomePage() {
                         </div>
                       </label>
                       <small className="creditNote">
-                        Cada teste usa 1 consulta. Cada busca adaptativa usa de 3 a 4 consultas do Serper para ampliar a cobertura. A conta nova inclui 2.500 consultas gratuitas, sem cartão. Nenhum enriquecimento é realizado.
+                        Cada teste usa 1 consulta. A busca adaptativa usa até 8 consultas curtas do Serper para formar um conjunto amplo antes do ranking. A conta nova inclui 2.500 consultas gratuitas, sem cartão. Nenhum enriquecimento é realizado.
                       </small>
                       <a className="providerHelpLink" href="https://serper.dev/" target="_blank" rel="noreferrer">
                         Criar conta ou consultar saldo no Serper
@@ -807,7 +832,7 @@ export default function HomePage() {
                   <label className="full"><span>Descrição da vaga — revise e altere como desejar *</span><textarea value={jobForm.description} onChange={(e) => setJobForm({ ...jobForm, description: e.target.value })} placeholder="A descrição importada aparecerá aqui, ou você pode escrever manualmente" rows={9} /></label>
                   <fieldset className="full keywordFields"><legend>Palavras-chave obrigatórias para a busca</legend>
                     {jobForm.keywords.map((keyword, index) => <input key={index} value={keyword} onChange={(e) => updateKeyword(index, e.target.value)} placeholder={`Palavra-chave ${index + 1}`} />)}
-                    <small className="keywordHint">Cada campo preenchido funciona como critério obrigatório. O Eureka aceita equivalentes em português, inglês e espanhol.</small>
+                    <small className="keywordHint">Cada campo vira um critério prioritário. O Eureka aceita equivalentes em português, inglês e espanhol e sinaliza quando a evidência pública precisa ser confirmada no LinkedIn.</small>
                   </fieldset>
                   <section className="full geographyBuilder" aria-labelledby="geography-title">
                     <div className="geographyHeader">
@@ -864,7 +889,7 @@ export default function HomePage() {
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
-                  <ShieldCheck size={16} /> Até {candidateLimit} candidatos por busca · o Eureka interrompe novas consultas ao atingir o limite · chave protegida no servidor
+                  <ShieldCheck size={16} /> Até {candidateLimit} candidatos por busca · o Eureka avalia um conjunto amplo antes de selecionar os melhores · chave protegida no servidor
                 </div>
               </article>
               <article className="glass results">
@@ -875,7 +900,7 @@ export default function HomePage() {
                     {jobIntelligence && <p className="intelligenceSummary">Família identificada: <strong>{jobIntelligence.familyLabel}</strong> · {jobIntelligence.equivalentTitles.length} cargo(s) equivalente(s){jobIntelligence.requiredKeywords?.length ? ` · ${jobIntelligence.requiredKeywords.length} palavra(s)-chave obrigatória(s)` : ""} · PT/EN/ES</p>}
                   </div>
                   {candidates.length > 0 && <div className="resultActions">
-                    {pythonRankingActive && <span className="pythonBadge">PYTHON · RANKING ATIVO</span>}
+                    {pythonRankingActive && <span className="pythonBadge">PYTHON ATIVO · {pythonEvaluatedCount} PERFIS REAVALIADOS</span>}
                     <button className="exportButton" onClick={downloadCandidateSpreadsheet} disabled={exportStatus === "working"}>
                       <Download size={17} /> {exportStatus === "working" ? "GERANDO EXCEL..." : "BAIXAR PLANILHA"}
                     </button>
@@ -901,7 +926,13 @@ export default function HomePage() {
                             <span className={`compatibilityBadge ${candidate.compatibility >= 70 ? "high" : candidate.compatibility >= 45 ? "medium" : "low"}`}>
                               {candidate.compatibility}%
                             </span>
+                            {candidate.tier && <span className={`candidateTier tier${candidate.tier}`} title={candidate.tierLabel}>
+                              {candidate.tier === "A" ? "EVIDÊNCIA COMPLETA" : candidate.tier === "B" ? "EVIDÊNCIA PARCIAL" : "CONFIRMAR NO PERFIL"}
+                            </span>}
                             <small className="matchReason">{candidate.matchReason}</small>
+                            {candidate.scoreBreakdown && <small className="scoreBreakdown">
+                              Cargo {candidate.scoreBreakdown.cargo} · Senioridade {candidate.scoreBreakdown.senioridade} · Competências {candidate.scoreBreakdown.competencias} · Localidade {candidate.scoreBreakdown.localidade}{candidate.scoreBreakdown.ruido ? ` · Ruído ${candidate.scoreBreakdown.ruido}` : ""}{candidate.scoreBreakdown.evidencia ? ` · Ajuste de evidência ${candidate.scoreBreakdown.evidencia}` : ""}
+                            </small>}
                             {candidate.evidenceLabel && <small className="evidenceConfidence">Confiança das evidências: {candidate.evidenceLabel}</small>}
                           </td>
                           <td>

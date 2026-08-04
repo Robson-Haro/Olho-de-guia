@@ -90,3 +90,44 @@ button,input,textarea{font:inherit}
 .geographyHeader{display:flex;align-items:center;justify-content:space-between;color:#70d8ff;margin-bottom:15px}.geographyHeader h4{margin:4px 0 0;color:#fff}.geographyControls{display:grid;grid-template-columns:1.15fr 1.15fr .7fr;gap:12px}.geographyControls label,.cityFieldsGrid label{display:grid;gap:7px}.geographyControls span,.cityFieldsGrid span{color:#c8d8e7;font-weight:800}.geographyBuilder select,.geographyBuilder input{width:100%;min-width:0;border:1px solid #83dfff35;background:#020a14;color:#fff;padding:13px 14px;border-radius:10px;outline:0;color-scheme:dark}.geographyBuilder select:focus,.geographyBuilder input:focus{border-color:#4dcfff;box-shadow:0 0 0 3px #4dcfff15}.geographyBuilder select:disabled,.geographyBuilder input:disabled{opacity:.45;cursor:not-allowed}.cityFieldsGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px;padding-top:14px;border-top:1px solid #ffffff0d}.countrywideToggle{display:flex!important;align-items:center;gap:12px;margin-top:14px;padding:13px 14px;border:1px solid #49caff35;border-radius:12px;background:#071b2daa;cursor:pointer}.countrywideToggle input{width:22px!important;height:22px;flex:0 0 22px;accent-color:#28b978}.countrywideToggle span{display:grid;gap:3px}.countrywideToggle small{color:#87a6bd;font-weight:400}.geographyScope{display:flex;align-items:flex-start;gap:9px;margin-top:12px;padding:11px 13px;border-radius:10px;color:#a9c4d8;background:#0a2c4466}.geographyScope svg{flex:0 0 auto;color:#5bd5ff}.geographyScope strong{color:#e8f8ff}.geoEvidence{display:block;margin-top:6px;color:#79d4ff;font-size:9px;line-height:1.35}.geographyTargetBar{display:grid;grid-template-columns:minmax(230px,.7fr) 1.3fr;gap:14px;margin-top:20px}.countryIdentity,.targetLocations{border:1px solid #55cfff2b;border-radius:14px;background:#061728aa;padding:15px}.countryIdentity{display:flex;align-items:center;gap:12px;color:#65d6ff}.countryIdentity span{display:grid;gap:3px;flex:1}.countryIdentity small,.targetLocations>small{color:#7899ae;font-size:8px;letter-spacing:1px;font-weight:900}.countryIdentity strong{color:#fff}.countryIdentity b{display:grid;place-items:center;min-width:42px;height:34px;border-radius:9px;color:#9df2c9;background:#0d553c66;border:1px solid #47db9b55}.targetLocations>div{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}.targetLocations span{padding:6px 9px;border:1px solid #4ccfff35;border-radius:20px;color:#bcecff;background:#0b263c;font-size:10px}.subdivisionPanel{min-height:360px;border:1px solid #5acfff22;border-radius:18px;background:radial-gradient(circle at 20% 10%,#0c6b9f33,transparent 45%),#03101e;padding:20px}.subdivisionPanel h4{margin:0}.subdivisionPanel>p{color:#7897ad;font-size:11px}.subdivisionList{display:grid;gap:8px;margin-top:15px}.subdivisionList button{display:flex;align-items:center;gap:10px;width:100%;padding:12px;border:1px solid #3b759555;border-radius:11px;background:#0b2538;color:#b9d2e4;text-align:left;cursor:pointer}.subdivisionList button:hover,.subdivisionList button.selected{border-color:#7cddff;color:#fff;background:linear-gradient(145deg,#0d719f,#084362);box-shadow:0 0 16px #42cfff44}.subdivisionList button span{display:grid;gap:2px;flex:1}.subdivisionList button small{color:#81a6bd;font-size:9px}.subdivisionList button b{min-width:32px;text-align:center;color:#9df2c9;font-size:18px}.geoPanel .geoGrid{grid-template-columns:.9fr 1.1fr}
 @media(max-width:950px){.geographyControls{grid-template-columns:1fr 1fr}.cityQuantityField{grid-column:1/-1}.cityFieldsGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.geographyTargetBar{grid-template-columns:1fr}}
 @media(max-width:620px){.geographyControls,.cityFieldsGrid{grid-template-columns:1fr}.cityQuantityField{grid-column:auto}.geographyBuilder{padding:14px}.geographyTargetBar{grid-template-columns:1fr}.geoPanel .geoGrid{grid-template-columns:1fr}}
+
+/* Estabilidade de layout: os cartões podem encolher sem invadir a coluna ao
+   lado, e os controles respondem à largura real do cartão — não só à janela. */
+header{gap:16px;flex-wrap:wrap}
+.headerActions{min-width:0;flex-wrap:wrap;justify-content:flex-end}
+.grid{grid-template-columns:minmax(0,.9fr) minmax(0,1.3fr)}
+.grid>article{min-width:0}
+.import{container-name:searchPanel;container-type:inline-size}
+.candidateTableWrap{max-width:100%;min-width:0}
+.searchSignal,.safe,.providerRunList>div>span:last-child{min-width:0;overflow-wrap:anywhere}
+.providerRunList>div{grid-template-columns:auto minmax(0,auto) minmax(0,1fr)}
+.searchForm label,.keywordFields,.geographyControls label,.cityFieldsGrid label{min-width:0}
+
+/* O código da vaga ocupa uma linha inteira. Isso impede que o campo seja
+   espremido entre a quantidade e o botão dentro do cartão estreito. */
+.topJobInput{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end}
+.topJobInput .jobCodeField{grid-column:1/-1}
+.topJobInput .candidateLimitField{grid-column:1;min-width:0;max-width:260px}
+.topJobInput>button{grid-column:2;justify-content:center;white-space:nowrap}
+.topJobInput.manualLimit{grid-template-columns:1fr}
+.topJobInput.manualLimit .candidateLimitField{grid-column:1;margin-left:0;justify-self:end;width:min(100%,260px)}
+
+.candidateTier{display:block;width:max-content;max-width:100%;margin-top:7px;padding:5px 7px;border:1px solid;border-radius:20px;font-size:8px;font-weight:900;letter-spacing:.45px}
+.candidateTier.tierA{color:#9df2c9;background:#0d553c55;border-color:#47db9b66}
+.candidateTier.tierB{color:#ffe09b;background:#76541655;border-color:#e6b84b66}
+.candidateTier.tierC{color:#ffb8bd;background:#70202a55;border-color:#e85a6866}
+.scoreBreakdown{display:block;margin-top:7px;color:#8ec7df;font-size:8px;line-height:1.45}
+
+@container searchPanel (max-width:620px){
+  .searchForm{grid-template-columns:1fr}
+  .searchForm .full,.searchForm>label{grid-column:1}
+  .geographyControls,.cityFieldsGrid{grid-template-columns:1fr}
+  .cityQuantityField{grid-column:auto}
+}
+
+@media(max-width:520px){
+  .topJobInput{grid-template-columns:1fr}
+  .topJobInput .jobCodeField,.topJobInput .candidateLimitField,.topJobInput>button{grid-column:1;width:100%;max-width:none}
+  .headerActions{width:100%;justify-content:flex-start}
+  .profile{margin-left:auto}
+}

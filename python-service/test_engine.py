@@ -37,8 +37,11 @@ class TalentEngineTests(unittest.TestCase):
             },
         ]
         _, ranked = rank_candidates(self.job, candidates)
+        # O perfil equivalente lidera e o perfil de outra área é mantido na
+        # lista apenas ao final, com pontuação claramente inferior.
         self.assertEqual("Ana", ranked[0]["name"])
-        self.assertEqual(1, len(ranked))
+        self.assertEqual("Bruno", ranked[-1]["name"])
+        self.assertGreater(ranked[0]["compatibility"], ranked[-1]["compatibility"])
         self.assertEqual("Python 3 · motor multilíngue", ranked[0]["rankingEngine"])
 
     def test_process_standardization_expands_titles_in_three_languages(self):
@@ -57,7 +60,7 @@ class TalentEngineTests(unittest.TestCase):
             concept.label for concept in intelligence.required_keywords
         ])
 
-    def test_required_keywords_remove_profiles_without_public_evidence(self):
+    def test_required_keywords_classify_profiles_without_public_evidence(self):
         job = {
             **self.job,
             "title": "Gerente de Padronização de Processos",
@@ -92,9 +95,81 @@ class TalentEngineTests(unittest.TestCase):
             },
         ]
         _, ranked = rank_candidates(job, candidates)
-        self.assertEqual(["Ana", "Carlos", "Diana"], sorted(candidate["name"] for candidate in ranked))
-        self.assertTrue(all(not candidate["missingRequiredKeywords"] for candidate in ranked))
-        self.assertTrue(all(len(candidate["matchedRequiredKeywords"]) == 2 for candidate in ranked))
+        # Quem evidencia todos os critérios obrigatórios ocupa as primeiras
+        # posições; quem não evidencia não é apagado, é rebaixado e sinalizado.
+        top = [candidate["name"] for candidate in ranked[:3]]
+        self.assertEqual(["Ana", "Carlos", "Diana"], sorted(top))
+        self.assertTrue(all(candidate["tier"] == "A" for candidate in ranked[:3]))
+        self.assertTrue(all(not candidate["missingRequiredKeywords"] for candidate in ranked[:3]))
+        self.assertTrue(all(len(candidate["matchedRequiredKeywords"]) == 2 for candidate in ranked[:3]))
+        rebaixados = {candidate["name"]: candidate for candidate in ranked[3:]}
+        self.assertEqual({"Bruno", "Eduardo"}, set(rebaixados))
+        self.assertTrue(all(candidate["tier"] in {"B", "C"} for candidate in rebaixados.values()))
+        self.assertTrue(all(candidate["missingRequiredKeywords"] for candidate in rebaixados.values()))
+
+    def test_manager_outranks_analyst_in_the_same_professional_family(self):
+        job = {
+            **self.job,
+            "title": "Gerente de Padronização de Processos",
+            "description": "Governança e padronização de processos industriais em curtume.",
+            "keywords": ["Couro e Curtume"],
+        }
+        candidates = [
+            {
+                "id": "1", "name": "Gerente", "title": "Process Standardization Manager",
+                "summary": "Process governance for leather and tannery operations",
+                "city": "São Paulo", "state": "SP", "country": "Brasil",
+                "profileUrl": "https://www.linkedin.com/in/gerente",
+            },
+            {
+                "id": "2", "name": "Analista", "title": "Analista de Padronização de Processos",
+                "summary": "Governança de processos de couro e curtume",
+                "city": "São Paulo", "state": "SP", "country": "Brasil",
+                "profileUrl": "https://www.linkedin.com/in/analista",
+            },
+        ]
+        _, ranked = rank_candidates(job, candidates)
+        self.assertEqual("Gerente", ranked[0]["name"])
+        self.assertGreater(ranked[0]["compatibility"], ranked[1]["compatibility"])
+        self.assertIn("senioridade compatível", ranked[0]["matchReason"])
+        self.assertIn("senioridade distante", ranked[1]["matchReason"])
+
+    def test_skill_explanation_never_reports_more_matches_than_the_denominator(self):
+        job = {
+            **self.job,
+            "title": "Gerente de Padronização de Processos",
+            "description": "Gestão e padronização de processos industriais em couro e curtume.",
+            "keywords": ["Couro e Curtume"],
+        }
+        _, ranked = rank_candidates(job, [{
+            "id": "1", "name": "Aderente", "title": "Gerente de Processos Industriais",
+            "company": "Curtume Alfa", "summary": "Padronização de processos de couro em curtume",
+            "city": "São Paulo", "state": "SP", "country": "Brasil",
+            "profileUrl": "https://www.linkedin.com/in/aderente",
+        }])
+        match = ranked[0]
+        ratio = next(part for part in match["matchReason"].split(" · ") if "competência(s)" in part)
+        numerator, denominator = (int(value) for value in ratio.split()[0].split("/"))
+        self.assertLessEqual(numerator, denominator)
+        self.assertEqual("A", match["tier"])
+        self.assertIn("completa", match["tierLabel"])
+        self.assertIn("evidencia", match["scoreBreakdown"])
+
+    def test_generic_terms_and_explicit_keyword_aliases_do_not_duplicate_skills(self):
+        job = {
+            **self.job,
+            "title": "Gerente de Padronização de Processos",
+            "description": "Gestão de equipes, processos, resultados e padronização de processos em couro e curtume.",
+            "keywords": ["Couro e Curtume"],
+        }
+        intelligence = analyze_job(job)
+        normalized = [skill.lower() for skill in intelligence.skills]
+        self.assertNotIn("gestao", normalized)
+        self.assertNotIn("processos", normalized)
+        self.assertNotIn("couro", normalized)
+        self.assertNotIn("curtume", normalized)
+        self.assertEqual(1, normalized.count("couro / leather"))
+        self.assertEqual(1, normalized.count("curtume / tannery"))
 
     def test_composite_keyword_field_becomes_two_required_concepts(self):
         job = {**self.job, "keywords": ["Couro e Curtume"]}

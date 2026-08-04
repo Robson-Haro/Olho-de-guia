@@ -29,6 +29,20 @@ STOP_WORDS = {
     "profesional", "requisitos", "responsabilidades", "y",
 }
 
+# Vocabulário frequente em descrições corporativas. Esses termos podem ajudar a
+# compreender a vaga, mas isoladamente não são competências distintivas e não
+# devem inflar a aderência de qualquer perfil.
+GENERIC_SKILL_TOKENS = {
+    "gestao", "gestor", "equipe", "equipes", "processo", "processos", "area",
+    "areas", "empresa", "empresas", "atividade", "atividades", "atuacao", "atuar",
+    "conhecimento", "desenvolvimento", "resultado", "resultados", "melhoria",
+    "continua", "projeto", "projetos", "cliente", "clientes", "negocio", "negocios",
+    "superior", "completo", "graduacao", "ensino", "trabalho", "rotina", "rotinas",
+    "apoio", "suporte", "garantir", "realizar", "acompanhar", "elaborar", "controle",
+    "analise", "informacoes", "relatorio", "relatorios", "oportunidade", "requisito",
+    "necessario", "diferencial", "industriais",
+}
+
 # Guardrail de emprego: estes termos nunca viram competência nem aumentam a
 # pontuação de um candidato, mesmo quando aparecem na descrição ou no snippet.
 SENSITIVE_PHRASES = (
@@ -328,7 +342,7 @@ def normalize(value: Any) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(char for char in text if not unicodedata.combining(char))
     text = text.lower().replace("&", " e ")
-    return re.sub(r"[^a-z0-9+#.]+", " ", text).strip()
+    return re.sub(r"[^a-z0-9+#]+", " ", text).strip()
 
 
 def tokens(value: Any) -> list[str]:
@@ -408,7 +422,10 @@ def keyword_evidence(concepts: Iterable[KeywordConcept], candidate_text: str) ->
 
 def detect_level(title: str) -> str | None:
     normalized = normalize(title)
-    for level, languages in LEVELS.items():
+    # Títulos públicos às vezes trazem o cargo atual e um cargo anterior. Quando
+    # houver mais de um nível, o mais sênior é a evidência mais conservadora.
+    for level in reversed(LEVEL_ORDER):
+        languages = LEVELS[level]
         for variants in languages.values():
             if any(phrase_in(normalized, variant) for variant in variants):
                 return level
@@ -487,13 +504,24 @@ def detected_skills(description: str, explicit_keywords: Iterable[str] = ()) -> 
             result.append(canonical)
 
     if len(result) < 8:
+        covered_tokens = {
+            token
+            for skill in result
+            for alias in SKILL_GROUPS.get(skill, (skill,))
+            for token in tokens(alias)
+        }
         frequencies = Counter(tokens(description))
         for token, _ in frequencies.most_common(18):
-            if len(token) >= 4 and not token.isdigit():
+            if (
+                len(token) >= 4
+                and not token.isdigit()
+                and token not in GENERIC_SKILL_TOKENS
+                and token not in covered_tokens
+            ):
                 result.append(token.capitalize())
             if len(unique(result)) >= 10:
                 break
-    return unique(result)[:12]
+    return unique(result)[:10]
 
 
 def analyze_job(job: dict[str, Any]) -> JobIntelligence:
@@ -594,30 +622,48 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     candidate_family = detect_family(title, candidate_text)
     candidate_level = detect_level(title)
 
+    best_title_similarity = max(
+        (cosine_similarity(variant, title) for variant in intelligence.equivalent_titles),
+        default=0.0,
+    )
     if intelligence.family and candidate_family == intelligence.family:
-        role_score = 45.0
-        title_alignment = f"cargo equivalente em {intelligence.family_label}"
-    else:
-        best_title_similarity = max(
-            (cosine_similarity(variant, title) for variant in intelligence.equivalent_titles),
-            default=0.0,
+        # Estar na mesma família profissional é um bom sinal, mas não prova
+        # aderência ao cargo: um Analista e um Diretor pertencem à mesma
+        # família. A nota cheia exige também semelhança real de título.
+        role_score = min(45.0, 26.0 + best_title_similarity * 19.0)
+        title_alignment = (
+            f"cargo equivalente em {intelligence.family_label}"
+            if best_title_similarity >= 0.45
+            else f"mesma família ({intelligence.family_label}), título divergente"
         )
-        role_score = min(38.0, best_title_similarity * 45.0)
+    else:
+        role_score = min(34.0, best_title_similarity * 42.0)
         title_alignment = "cargo parcialmente relacionado" if role_score >= 18 else "cargo pouco relacionado"
 
     matches = skill_matches(intelligence.skills, candidate_text)
     matched_required, missing_required = keyword_evidence(intelligence.required_keywords, candidate_text)
     skill_denominator = min(max(len(intelligence.skills), 1), 6)
-    skill_score = min(30.0, (len(matches) / skill_denominator) * 30.0)
+    visible_match_count = min(len(matches), skill_denominator)
+    skill_score = min(30.0, (visible_match_count / skill_denominator) * 30.0)
     seniority_score, seniority_reason = level_alignment(intelligence.level, candidate_level)
     location_score, location_reason = location_alignment(job, candidate, candidate_text)
-    compatibility = round(min(100.0, role_score + skill_score + seniority_score + location_score))
+    source_breakdown = candidate.get("scoreBreakdown") if isinstance(candidate.get("scoreBreakdown"), dict) else {}
+    try:
+        source_noise = float(source_breakdown.get("ruido") or 0)
+    except (TypeError, ValueError):
+        source_noise = 0.0
+    noise_penalty = min(30.0, abs(min(0.0, source_noise)))
+    base_compatibility = round(max(0.0, min(
+        100.0,
+        role_score + skill_score + seniority_score + location_score - noise_penalty,
+    )))
+    compatibility = base_compatibility
     confidence, confidence_label = evidence_confidence(candidate_text)
 
     missing = [skill for skill in intelligence.skills if skill not in matches][:5]
     reasons = [
         title_alignment,
-        f"{len(matches)}/{min(len(intelligence.skills), 6)} competência(s) visível(is)",
+        f"{visible_match_count}/{skill_denominator} competência(s) visível(is)",
         *(
             [f"{len(matched_required)}/{len(intelligence.required_keywords)} palavra(s)-chave obrigatória(s)"]
             if intelligence.required_keywords else []
@@ -625,8 +671,28 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         seniority_reason,
         location_reason,
     ]
+    if noise_penalty:
+        reasons.append("trecho público com possível ruído de busca")
     ranked = dict(candidate)
+    default_tier = "A" if not missing_required else ("B" if matched_required else "C")
+    supplied_tier = str(candidate.get("tier") or "")
+    tier = supplied_tier if supplied_tier in {"A", "B", "C"} else default_tier
+    if missing_required and tier == "A":
+        tier = default_tier
+    # A evidência parcial reduz a nota, mas não elimina o profissional: o
+    # trecho público do Google raramente repete todos os critérios.
+    if tier == "B":
+        compatibility = round(compatibility * 0.78)
+    elif tier == "C":
+        compatibility = round(compatibility * 0.55)
+    tier_label = {
+        "A": "evidência pública completa dos critérios prioritários",
+        "B": "evidência pública parcial; confirmar o perfil completo",
+        "C": "sem evidência pública suficiente; confirmar antes de abordar",
+    }[tier]
     ranked.update({
+        "tier": tier,
+        "tierLabel": tier_label,
         "compatibility": compatibility,
         "matchReason": " · ".join(reasons),
         "matchedSkills": matches[:8],
@@ -637,6 +703,14 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         "evidenceConfidence": confidence,
         "evidenceLabel": confidence_label,
         "rankingEngine": "Python 3 · motor multilíngue",
+        "scoreBreakdown": {
+            "cargo": round(role_score),
+            "senioridade": round(seniority_score),
+            "competencias": round(skill_score),
+            "localidade": round(location_score),
+            "ruido": -round(noise_penalty),
+            "evidencia": compatibility - base_compatibility,
+        },
     })
     return ranked
 
@@ -644,14 +718,14 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
 def rank_candidates(job: dict[str, Any], candidates: Iterable[dict[str, Any]]) -> tuple[JobIntelligence, list[dict[str, Any]]]:
     intelligence = analyze_job(job)
     ranked = [rank_candidate(job, intelligence, candidate) for candidate in candidates]
-    ranked = [candidate for candidate in ranked if not candidate.get("missingRequiredKeywords")]
+    tier_rank = {"A": 0, "B": 1, "C": 2}
     ranked.sort(
         key=lambda item: (
-            int(item.get("compatibility") or 0),
-            int(item.get("evidenceConfidence") or 0),
+            tier_rank.get(str(item.get("tier") or "A"), 3),
+            -int(item.get("compatibility") or 0),
+            -int(item.get("evidenceConfidence") or 0),
             normalize(item.get("name")),
         ),
-        reverse=True,
     )
     for position, candidate in enumerate(ranked, start=1):
         candidate["rank"] = position

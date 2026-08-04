@@ -18,6 +18,7 @@ type SearchRequest = {
   requiredKeywordConcepts?: Array<{ label?: string; aliases?: string[] }>;
   nationwide?: boolean;
   maxCandidates?: number;
+  strictRequiredKeywords?: boolean;
 };
 
 function clean(value: unknown, limit = 500) {
@@ -106,6 +107,7 @@ export async function POST(request: Request) {
       requiredKeywordConcepts,
       countrywide,
       maxCandidates,
+      strictRequiredKeywords: body.strictRequiredKeywords === true,
     });
 
     if (!result.configured) {
@@ -114,6 +116,7 @@ export async function POST(request: Request) {
         code: "TALENT_SOURCE_NOT_CONFIGURED",
         completed: false,
         candidates: [],
+        pool: [],
         providers: [],
         strategies,
       }, { status: 503 });
@@ -126,6 +129,7 @@ export async function POST(request: Request) {
         code: "ALL_TALENT_SOURCES_FAILED",
         completed: false,
         candidates: [],
+        pool: [],
         providers: result.providers,
         strategies,
       }, { status: 502 });
@@ -135,7 +139,11 @@ export async function POST(request: Request) {
       ok: true,
       completed: true,
       candidates: result.candidates,
+      // Reserva ranqueada enviada ao motor Python: ele reordena um conjunto
+      // amplo, e não apenas os perfis que já entrariam na lista final.
+      pool: result.pool,
       total: result.candidates.length,
+      evaluated: result.pool.length,
       geography: {
         ...geography,
         country,
