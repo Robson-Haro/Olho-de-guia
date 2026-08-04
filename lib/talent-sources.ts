@@ -1,10 +1,13 @@
 import { getSecret, saveSecret } from "@/lib/secure-settings";
 import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
+import { getMarketSegment } from "@/lib/market-segments";
 
 export type TalentProvider = "serper";
 
 export type TalentSearchInput = {
   title: string;
+  marketSegment?: string;
+  mappedCompanies?: string[];
   titleVariants?: string[];
   countryCode: string;
   country: string;
@@ -51,6 +54,7 @@ export type TalentCandidate = {
     localidade: number;
     ruido: number;
     evidencia?: number;
+    segmento?: number;
   };
 };
 
@@ -64,6 +68,7 @@ export type ProviderSearchStatus = {
   poolSize?: number;
   elapsedMs?: number;
   tiers?: { A: number; B: number; C: number };
+  mappedCompanies?: string[];
 };
 
 const PROVIDER = {
@@ -514,9 +519,12 @@ function calculateCompatibility(
           : 0;
 
   const noise = noiseAssessment(candidateText);
+  const mappedCompanies = unique((input.mappedCompanies || []).map(naturalSearchTerm).filter(Boolean));
+  const matchedCompany = mappedCompanies.find((company) => includesNormalized(candidateText, company));
+  const segmentScore = input.marketSegment ? (matchedCompany ? 10 : 2) : 0;
   const compatibility = Math.max(
     0,
-    Math.min(100, role.score + seniority.score + keywordScore + locationScore - noise.penalty),
+    Math.min(100, role.score + seniority.score + keywordScore + locationScore + segmentScore - noise.penalty),
   );
 
   const tier: CandidateTier = !requiredEvidence.concepts.length
@@ -538,6 +546,7 @@ function calculateCompatibility(
     `${matchedKeywords.length}/${keywordPhrases.length || 0} competência(s) pública(s)`,
     candidate.geographicLabel || "localidade não confirmada",
   ];
+  if (input.marketSegment) reasons.push(matchedCompany ? `empresa do segmento: ${matchedCompany}` : "segmento direcionado pela consulta; empresa a confirmar");
   if (noise.labels.length) reasons.push(`atenção: ${noise.labels.join(", ")}`);
 
   return {
@@ -554,6 +563,7 @@ function calculateCompatibility(
       competencias: keywordScore,
       localidade: locationScore,
       ruido: -noise.penalty,
+      segmento: segmentScore,
     },
   };
 }
@@ -717,6 +727,8 @@ function buildSearchPlan(input: TalentSearchInput) {
   const groups = input.countrywide ? [[]] : citySearchGroups(input.cities);
   const sharedCities = input.countrywide ? [] : input.cities.slice(0, 8);
   const searches: SerperSearch[] = [];
+  const companyExpression = (input.mappedCompanies || []).slice(0, 12).map(exactPhrase).filter(Boolean);
+  const companies = companyExpression.length > 1 ? `(${companyExpression.join(" OR ")})` : companyExpression[0] || "";
 
   const push = (query: string, page: number, targetCities: string[], layer: SerperSearch["layer"]) => {
     const normalized = `site:linkedin.com/in ${query}`.replace(/\s+/g, " ").trim();
@@ -726,13 +738,13 @@ function buildSearchPlan(input: TalentSearchInput) {
   // Camada 1 — âncora: título exato entre aspas + conceitos + geografia.
   const primaryTitle = exactPhrase(titles[0] || input.title);
   for (const targetCities of groups.slice(0, 3)) {
-    push(`${primaryTitle} ${conceptExpression} ${geographicQuery(input, targetCities)}`, 1, targetCities, "ancora");
+    push(`${primaryTitle} ${conceptExpression} ${companies} ${geographicQuery(input, targetCities)}`, 1, targetCities, "ancora");
   }
 
   // Camada 2 — variantes de cargo com apenas o conceito mais distintivo. Exigir
   // todos os critérios no snippet do Google diminuía demais a cobertura.
   for (const variant of titles.slice(1, 4)) {
-    push(`${exactPhrase(variant)} ${discoveryConcept} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "variante");
+    push(`${exactPhrase(variant)} ${discoveryConcept} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "variante");
   }
 
   // Camada 3 — domínio: quem tem a expertise mas usa outro nome de cargo.
@@ -741,7 +753,7 @@ function buildSearchPlan(input: TalentSearchInput) {
     const levelExpression = jobLevel
       ? `(${jobLevel.terms.slice(0, 4).map(exactPhrase).filter(Boolean).join(" OR ")})`
       : "";
-    push(`${conceptExpression} ${levelExpression} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "dominio");
+    push(`${conceptExpression} ${levelExpression} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "dominio");
   }
 
   // Camada 4 — profundidade progressiva. A página 2 mantém o conceito mais
@@ -796,6 +808,33 @@ async function callSerper(apiKey: string, query: string, num = RESULTS_PER_QUERY
   }
 }
 
+async function discoverSegmentCompanies(apiKey: string, input: TalentSearchInput) {
+  const segment = getMarketSegment(input.marketSegment);
+  if (!segment.value) return { companies: [] as string[], queries: 0 };
+  const profile = getCountryProfile(input.countryCode);
+  const queries = [
+    `maiores empresas ${segment.searchTerms.slice(0, 2).join(" OR ")} ${profile.name}`,
+    `empresas ${segment.searchTerms.slice(2).join(" OR ")} ${input.subdivision || profile.name}`,
+  ];
+  const settled = await Promise.allSettled(queries.map((query) => callSerper(apiKey, query, 10, 1, input.countryCode)));
+  const publicText = settled.flatMap((outcome) => {
+    if (outcome.status !== "fulfilled") return [];
+    const organic = Array.isArray(outcome.value?.organic) ? outcome.value.organic as Array<Record<string, unknown>> : [];
+    const knowledgeTitle = outcome.value?.knowledgeGraph && typeof outcome.value.knowledgeGraph === "object"
+      ? plain((outcome.value.knowledgeGraph as Record<string, unknown>).title)
+      : "";
+    return [knowledgeTitle, ...organic.flatMap((result) => [plain(result.title), plain(result.snippet)])];
+  }).join(" ");
+  const validatedSeeds = (segment.seedCompanies || []).filter((company) => includesNormalized(publicText, company));
+  // A base curada evita transformar títulos de matérias e diretórios em nomes
+  // de empregadores. O Google valida e prioriza as empresas que aparecem agora;
+  // as demais sementes garantem cobertura quando o snippet é curto.
+  return {
+    companies: unique([...validatedSeeds, ...(segment.seedCompanies || [])]).slice(0, 12),
+    queries: settled.filter((outcome) => outcome.status === "fulfilled").length,
+  };
+}
+
 function deduplicate(candidates: TalentCandidate[]) {
   const seen = new Map<string, TalentCandidate>();
   for (const candidate of candidates) {
@@ -820,7 +859,9 @@ function orderCandidates(candidates: TalentCandidate[]) {
 
 async function searchSerper(apiKey: string, input: TalentSearchInput) {
   const startedAt = Date.now();
-  const plan = buildSearchPlan(input);
+  const companyDiscovery = await discoverSegmentCompanies(apiKey, input);
+  const enrichedInput = { ...input, mappedCompanies: companyDiscovery.companies };
+  const plan = buildSearchPlan(enrichedInput);
   const maxCandidates = Math.min(20, Math.max(1, Math.trunc(input.maxCandidates || 20)));
 
   const parsePayload = (payload: Record<string, unknown> | null, search: SerperSearch, payloadIndex: number) => {
@@ -828,11 +869,12 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
       ? payload.organic as Array<Record<string, unknown>>
       : [];
     return organic
-      .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, input, search.targetCities))
+      .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, enrichedInput, search.targetCities))
       .filter((candidate): candidate is TalentCandidate => Boolean(candidate));
   };
 
-  let queries = 0;
+  let queries = companyDiscovery.queries;
+  let talentQueries = 0;
   let pool: TalentCandidate[] = [];
   let firstError: Error | null = null;
 
@@ -846,6 +888,7 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
     settled.forEach((outcome, batchIndex) => {
       if (outcome.status === "fulfilled") {
         queries += 1;
+        talentQueries += 1;
         pool = pool.concat(parsePayload(outcome.value, batch[batchIndex], index + batchIndex));
       } else if (!firstError) {
         firstError = outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason));
@@ -857,7 +900,7 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
     if (strongCandidates.length >= maxCandidates * 3) break;
   }
 
-  if (!queries) {
+  if (!talentQueries) {
     throw firstError || new Error(`${PROVIDER.label}: nenhuma estratégia de busca pôde ser executada.`);
   }
 
@@ -878,6 +921,7 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
     poolSize: ranked.length,
     tiers,
     elapsedMs: Date.now() - startedAt,
+    mappedCompanies: companyDiscovery.companies,
   };
 }
 
@@ -908,6 +952,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
     return {
       candidates: [] as TalentCandidate[],
       pool: [] as TalentCandidate[],
+      mappedCompanies: [] as string[],
       providers: [] as ProviderSearchStatus[],
       configured: false,
     };
@@ -926,6 +971,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
     return {
       candidates: result.candidates,
       pool: result.pool,
+      mappedCompanies: result.mappedCompanies,
       providers: [{
         provider: "serper" as const,
         label: PROVIDER.label,
@@ -935,7 +981,8 @@ export async function searchTalentSources(input: TalentSearchInput) {
         poolSize: result.poolSize,
         elapsedMs: result.elapsedMs,
         tiers: result.tiers,
-        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope}, avaliou ${result.poolSize} perfil(is) público(s) e classificou os ${result.candidates.length} melhores.${evidenceNote}`,
+        mappedCompanies: result.mappedCompanies,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope}${result.mappedCompanies.length ? `, mapeou ${result.mappedCompanies.length} empresa(s) do segmento` : ""}, avaliou ${result.poolSize} perfil(is) público(s) e classificou os ${result.candidates.length} melhores.${evidenceNote}`,
       }],
       configured: true,
     };
@@ -943,6 +990,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
     return {
       candidates: [] as TalentCandidate[],
       pool: [] as TalentCandidate[],
+      mappedCompanies: [] as string[],
       providers: [{
         provider: "serper" as const,
         label: PROVIDER.label,

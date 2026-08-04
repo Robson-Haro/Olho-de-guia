@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { COUNTRY_OPTIONS, findCountryCode, geographicLocationLabel, getCountryProfile } from "@/lib/geography";
+import { MARKET_SEGMENTS } from "@/lib/market-segments";
 import {
   Bird,
   BriefcaseBusiness,
@@ -83,11 +84,13 @@ type Candidate = {
     localidade: number;
     ruido: number;
     evidencia?: number;
+    segmento?: number;
   };
 };
 
 type JobForm = {
   title: string;
+  marketSegment: string;
   countryCode: string;
   subdivision: string;
   cityCount: number;
@@ -117,6 +120,7 @@ type ProviderSearchStatus = {
   poolSize?: number;
   elapsedMs?: number;
   tiers?: { A: number; B: number; C: number };
+  mappedCompanies?: string[];
 };
 
 type TalentSourceStatus = {
@@ -154,6 +158,7 @@ export default function HomePage() {
   const [jobEntryMode, setJobEntryMode] = useState<"gupy" | "manual">("gupy");
   const [jobForm, setJobForm] = useState<JobForm>({
     title: "",
+    marketSegment: "",
     countryCode: "BR",
     subdivision: "",
     cityCount: 1,
@@ -333,7 +338,7 @@ export default function HomePage() {
   }
   function prepareManualJob() {
     setImportedJob(null);
-    setJobForm({ title: "", countryCode: "BR", subdivision: "", cityCount: 1, cities: [""], description: "", keywords: ["", "", "", ""], countrywide: false });
+    setJobForm({ title: "", marketSegment: "", countryCode: "BR", subdivision: "", cityCount: 1, cities: [""], description: "", keywords: ["", "", "", ""], countrywide: false });
     setMessage("Preencha os dados abaixo e inicie a busca.");
     setSearchStatus("idle");
     setSearchStrategies([]);
@@ -343,7 +348,7 @@ export default function HomePage() {
     setPythonEvaluatedCount(0);
   }
 
-  async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = []) {
+  async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = [], mappedCompanies: string[] = []) {
     const profile = getCountryProfile(job.countryCode);
     const normalizedJob = {
       ...job,
@@ -351,6 +356,7 @@ export default function HomePage() {
       city: job.cities[0] || "",
       additionalCity: job.cities.slice(1).join(", "),
       nationwide: job.countrywide,
+      mappedCompanies,
     };
     const response = await fetch("/svc/intelligence/analyze", {
       method: "POST",
@@ -425,7 +431,8 @@ export default function HomePage() {
       if (evaluationPool.length && pythonPrepared) {
         try {
           setSearchMessage(`Reavaliando ${evaluationPool.length} perfis pelo motor Python multilíngue...`);
-          const rankingData = await requestPythonIntelligence(jobForm, evaluationPool);
+          const mappedCompanies = Array.isArray(data.mappedCompanies) ? data.mappedCompanies : [];
+          const rankingData = await requestPythonIntelligence(jobForm, evaluationPool, mappedCompanies);
           if (Array.isArray(rankingData.candidates)) {
             rankedCandidates = rankingData.candidates.slice(0, candidateLimit);
             setPythonRankingActive(true);
@@ -456,7 +463,7 @@ export default function HomePage() {
         : requiredKeywordCount
           ? `A busca executou ${queriesUsed} consulta(s), mas não encontrou perfis públicos suficientes para classificar. Revise os critérios ou amplie a localização.`
           : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
-      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, country: selectedCountryProfile.name, cities: selectedCities, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, createdAt: new Date().toISOString() }));
+      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, country: selectedCountryProfile.name, cities: selectedCities, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, mappedCompanies: data.mappedCompanies || [], createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
       setSearchMessage(error instanceof Error ? error.message : "Erro ao iniciar busca.");
@@ -829,6 +836,7 @@ export default function HomePage() {
                 </div>
                 <div className="searchForm">
                   <label><span>Título da vaga *</span><input value={jobForm.title} onChange={(e) => setJobForm({ ...jobForm, title: e.target.value })} placeholder="Ex.: Analista de Logística" /></label>
+                  <label><span>Segmento de mercado</span><select value={jobForm.marketSegment} onChange={(e) => setJobForm({ ...jobForm, marketSegment: e.target.value })} aria-label="Segmento de mercado">{MARKET_SEGMENTS.map((segment) => <option key={segment.value || "all"} value={segment.value}>{segment.label}</option>)}</select><small>Quando selecionado, o Eureka mapeia empresas do segmento no Google antes de procurar profissionais.</small></label>
                   <label className="full"><span>Descrição da vaga — revise e altere como desejar *</span><textarea value={jobForm.description} onChange={(e) => setJobForm({ ...jobForm, description: e.target.value })} placeholder="A descrição importada aparecerá aqui, ou você pode escrever manualmente" rows={9} /></label>
                   <fieldset className="full keywordFields"><legend>Palavras-chave obrigatórias para a busca</legend>
                     {jobForm.keywords.map((keyword, index) => <input key={index} value={keyword} onChange={(e) => updateKeyword(index, e.target.value)} placeholder={`Palavra-chave ${index + 1}`} />)}
@@ -886,6 +894,7 @@ export default function HomePage() {
                       <span>{provider.message}</span>
                     </div>)}
                   </div>}
+                  {providerResults.some((provider) => provider.mappedCompanies?.length) && <div className="geographyScope full"><Database size={18} /><span><strong>Empresas do segmento mapeadas:</strong> {providerResults.flatMap((provider) => provider.mappedCompanies || []).join(" · ")}</span></div>}
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
@@ -931,7 +940,7 @@ export default function HomePage() {
                             </span>}
                             <small className="matchReason">{candidate.matchReason}</small>
                             {candidate.scoreBreakdown && <small className="scoreBreakdown">
-                              Cargo {candidate.scoreBreakdown.cargo} · Senioridade {candidate.scoreBreakdown.senioridade} · Competências {candidate.scoreBreakdown.competencias} · Localidade {candidate.scoreBreakdown.localidade}{candidate.scoreBreakdown.ruido ? ` · Ruído ${candidate.scoreBreakdown.ruido}` : ""}{candidate.scoreBreakdown.evidencia ? ` · Ajuste de evidência ${candidate.scoreBreakdown.evidencia}` : ""}
+                              Cargo {candidate.scoreBreakdown.cargo} · Senioridade {candidate.scoreBreakdown.senioridade} · Competências {candidate.scoreBreakdown.competencias} · Localidade {candidate.scoreBreakdown.localidade}{candidate.scoreBreakdown.segmento ? ` · Segmento ${candidate.scoreBreakdown.segmento}` : ""}{candidate.scoreBreakdown.ruido ? ` · Ruído ${candidate.scoreBreakdown.ruido}` : ""}{candidate.scoreBreakdown.evidencia ? ` · Ajuste de evidência ${candidate.scoreBreakdown.evidencia}` : ""}
                             </small>}
                             {candidate.evidenceLabel && <small className="evidenceConfidence">Confiança das evidências: {candidate.evidenceLabel}</small>}
                           </td>

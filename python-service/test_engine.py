@@ -107,6 +107,31 @@ class TalentEngineTests(unittest.TestCase):
         self.assertTrue(all(candidate["tier"] in {"B", "C"} for candidate in rebaixados.values()))
         self.assertTrue(all(candidate["missingRequiredKeywords"] for candidate in rebaixados.values()))
 
+    def test_segment_company_evidence_improves_ranking(self):
+        job = {
+            **self.job,
+            "title": "Analista Financeiro",
+            "marketSegment": "beef_processing",
+            "mappedCompanies": ["Minerva Foods", "JBS", "Marfrig"],
+        }
+        candidates = [
+            {
+                "id": "1", "name": "Ana", "title": "Analista Financeiro",
+                "company": "Minerva Foods", "summary": "Budget, forecast e Excel",
+                "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/ana",
+            },
+            {
+                "id": "2", "name": "Bruno", "title": "Analista Financeiro",
+                "company": "Empresa não mapeada", "summary": "Budget, forecast e Excel",
+                "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/bruno",
+            },
+        ]
+        _, ranked = rank_candidates(job, candidates)
+        self.assertEqual("Ana", ranked[0]["name"])
+        self.assertEqual(10, ranked[0]["scoreBreakdown"]["segmento"])
+        self.assertEqual(2, ranked[1]["scoreBreakdown"]["segmento"])
+        self.assertIn("empresa do segmento", ranked[0]["matchReason"])
+
     def test_manager_outranks_analyst_in_the_same_professional_family(self):
         job = {
             **self.job,

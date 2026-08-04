@@ -653,9 +653,12 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     except (TypeError, ValueError):
         source_noise = 0.0
     noise_penalty = min(30.0, abs(min(0.0, source_noise)))
+    mapped_companies = job.get("mappedCompanies") if isinstance(job.get("mappedCompanies"), list) else []
+    matched_company = next((str(company) for company in mapped_companies if phrase_in(normalize(candidate_text), str(company))), "")
+    segment_score = 10.0 if matched_company else (2.0 if job.get("marketSegment") else 0.0)
     base_compatibility = round(max(0.0, min(
         100.0,
-        role_score + skill_score + seniority_score + location_score - noise_penalty,
+        role_score + skill_score + seniority_score + location_score + segment_score - noise_penalty,
     )))
     compatibility = base_compatibility
     confidence, confidence_label = evidence_confidence(candidate_text)
@@ -671,6 +674,8 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         seniority_reason,
         location_reason,
     ]
+    if job.get("marketSegment"):
+        reasons.append(f"empresa do segmento: {matched_company}" if matched_company else "segmento direcionado; empresa a confirmar")
     if noise_penalty:
         reasons.append("trecho público com possível ruído de busca")
     ranked = dict(candidate)
@@ -710,6 +715,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             "localidade": round(location_score),
             "ruido": -round(noise_penalty),
             "evidencia": compatibility - base_compatibility,
+            "segmento": round(segment_score),
         },
     })
     return ranked

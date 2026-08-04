@@ -4,6 +4,7 @@ import { geographicLocationLabel, getCountryProfile } from "@/lib/geography";
 
 type SearchRequest = {
   title?: string;
+  marketSegment?: string;
   titleVariants?: string[];
   countryCode?: string;
   subdivision?: string;
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as SearchRequest;
     const title = clean(body.title, 150);
+    const marketSegment = clean(body.marketSegment, 80);
     const countryCode = clean(body.countryCode, 2).toUpperCase() || "BR";
     const country = getCountryProfile(countryCode).name;
     const subdivision = clean(body.subdivision, 120);
@@ -96,6 +98,7 @@ export async function POST(request: Request) {
     const strategies = manualStrategies(title, geography, keywords);
     const result = await searchTalentSources({
       title,
+      marketSegment,
       titleVariants,
       countryCode,
       country,
@@ -150,6 +153,7 @@ export async function POST(request: Request) {
         label: geographicLocationLabel(geography),
       },
       providers: result.providers,
+      mappedCompanies: result.mappedCompanies,
       strategies,
     });
   } catch (error) {
