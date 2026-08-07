@@ -568,6 +568,21 @@ function calculateCompatibility(
   };
 }
 
+function passesMinimumProfessionalFit(
+  candidate: Pick<TalentCandidate, "title" | "company" | "summary">,
+  input: TalentSearchInput,
+) {
+  const titleText = [candidate.title, candidate.company].filter(Boolean).join(" ");
+  const role = roleScore(titleText || candidate.summary || "", input);
+  const jobLevel = detectSeniority(input.title);
+  const candidateLevel = detectSeniority(titleText);
+  if (role.score < 8) return false;
+  if (!jobLevel) return true;
+  const jobIndex = SENIORITY_ORDER.indexOf(jobLevel.key);
+  if (!candidateLevel) return jobIndex < SENIORITY_ORDER.indexOf("manager");
+  return Math.abs(jobIndex - SENIORITY_ORDER.indexOf(candidateLevel.key)) <= 1;
+}
+
 function parseProfessionalTitle(value: unknown) {
   const rawTitle = plain(value)
     .replace(/\s*[|·–—-]\s*LinkedIn\s*$/i, "")
@@ -611,6 +626,9 @@ function serperCandidate(
     geographicLabel: location.geographicLabel,
     searchedLocations,
   };
+  // O resultado do Google só entra no pool se houver evidência mínima de cargo
+  // e senioridade. Localização e termos genéricos não compensam incompatibilidade.
+  if (!passesMinimumProfessionalFit(baseCandidate, input)) return null;
   const score = calculateCompatibility(baseCandidate, input);
 
   // O trecho público do Google tem cerca de 160 caracteres. Eliminar de forma
@@ -722,6 +740,13 @@ function buildSearchPlan(input: TalentSearchInput) {
   const conceptExpression = conceptGroups.join(" ");
   const discoveryConcept = conceptGroups[0]
     || exactPhrase((input.semanticKeywords || []).find((term) => !GENERIC_CORPORATE_TERMS.has(withoutAccents(term))) || "");
+  const semanticConcepts = unique((input.semanticKeywords || [])
+    .map(naturalSearchTerm)
+    .filter((term) => term && !GENERIC_CORPORATE_TERMS.has(withoutAccents(term))))
+    .slice(0, 4)
+    .map(exactPhrase)
+    .filter(Boolean);
+  const semanticExpression = conceptExpression || semanticConcepts.slice(0, 3).join(" ");
 
   const titles = titleVariants(input.title, input.titleVariants);
   const groups = input.countrywide ? [[]] : citySearchGroups(input.cities);
@@ -738,7 +763,7 @@ function buildSearchPlan(input: TalentSearchInput) {
   // Camada 1 — âncora: título exato entre aspas + conceitos + geografia.
   const primaryTitle = exactPhrase(titles[0] || input.title);
   for (const targetCities of groups.slice(0, 3)) {
-    push(`${primaryTitle} ${conceptExpression} ${companies} ${geographicQuery(input, targetCities)}`, 1, targetCities, "ancora");
+    push(`${primaryTitle} ${semanticExpression} ${companies} ${geographicQuery(input, targetCities)}`, 1, targetCities, "ancora");
   }
 
   // Camada 2 — variantes de cargo com apenas o conceito mais distintivo. Exigir
@@ -748,12 +773,12 @@ function buildSearchPlan(input: TalentSearchInput) {
   }
 
   // Camada 3 — domínio: quem tem a expertise mas usa outro nome de cargo.
-  if (conceptExpression) {
+  if (semanticExpression) {
     const jobLevel = detectSeniority(input.title);
     const levelExpression = jobLevel
       ? `(${jobLevel.terms.slice(0, 4).map(exactPhrase).filter(Boolean).join(" OR ")})`
       : "";
-    push(`${conceptExpression} ${levelExpression} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "dominio");
+    push(`${semanticExpression} ${levelExpression} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "dominio");
   }
 
   // Camada 4 — profundidade progressiva. A página 2 mantém o conceito mais

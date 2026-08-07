@@ -317,6 +317,31 @@ SKILL_GROUPS: dict[str, tuple[str, ...]] = {
     "Budget e forecast": ("budget", "forecast", "orcamento", "previsao"),
     "Recrutamento e seleção": ("recrutamento", "recruitment", "recruiting", "reclutamiento", "selecao"),
     "Clima e engajamento": ("clima", "engajamento", "engagement", "compromiso"),
+    "HR Business Partner estratégico": (
+        "hr business partner", "hrbp", "business partner de rh", "strategic hr business partner",
+        "people business partner", "socio estrategico de recursos humanos",
+    ),
+    "Liderança integral de RH": (
+        "lideranca de recursos humanos", "lideranca da area de recursos humanos", "head de rh",
+        "head of hr", "hr director", "human resources director", "diretor de recursos humanos",
+        "gestao de ponta a ponta", "end to end hr", "full hr lifecycle",
+    ),
+    "Relações trabalhistas e sindicais": (
+        "relacoes trabalhistas", "relacoes sindicais", "sindicatos", "sindicato",
+        "labor relations", "employee relations", "union relations", "collective bargaining",
+        "relaciones laborales", "relaciones sindicales",
+    ),
+    "RH em operação industrial": (
+        "rh industrial", "recursos humanos industrial", "operacao industrial", "fabrica",
+        "manufacturing hr", "plant hr", "industrial operation", "industrial relations",
+    ),
+    "Turnover e retenção": (
+        "turnover", "retencao", "retention", "attrition", "rotatividade",
+    ),
+    "Gestão da força de trabalho e custos": (
+        "workforce management", "workforce planning", "gestao da forca de trabalho",
+        "p&l de rh", "hr p&l", "people cost", "custo de pessoal", "otimizacao de custos",
+    ),
     **KEYWORD_EQUIVALENTS,
 }
 
@@ -367,7 +392,11 @@ def unique(values: Iterable[str]) -> list[str]:
 
 def phrase_in(text: str, phrase: str) -> bool:
     normalized_phrase = normalize(phrase)
-    return bool(normalized_phrase and normalized_phrase in text)
+    if not normalized_phrase:
+        return False
+    # Limites léxicos evitam falsos positivos graves: por exemplo, "cto"
+    # (Chief Technology Officer) não pode ser encontrado dentro de "director".
+    return bool(re.search(rf"(?:^|\s){re.escape(normalized_phrase)}(?:$|\s)", normalize(text)))
 
 
 def is_sensitive(value: str) -> bool:
@@ -440,6 +469,8 @@ def family_phrases(family: dict[str, Any]) -> list[str]:
 def detect_family(title: str, description: str = "") -> str | None:
     title_text = normalize(title)
     description_text = normalize(description)
+    if re.search(r"\bhr\b", title_text):
+        return "human_resources"
     scores: dict[str, float] = {}
     for key, family in ROLE_FAMILIES.items():
         score = 0.0
@@ -622,6 +653,20 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     candidate_family = detect_family(title, candidate_text)
     candidate_level = detect_level(title)
 
+    # Elegibilidade vem antes da pontuação. Um algoritmo de seleção não pode
+    # transformar localização ou palavras corporativas genéricas em aderência
+    # quando cargo/família e senioridade são incompatíveis.
+    family_eligible = not intelligence.family or candidate_family == intelligence.family
+    seniority_distance: int | None = None
+    seniority_eligible = True
+    if intelligence.level:
+        if candidate_level:
+            seniority_distance = abs(LEVEL_ORDER.index(intelligence.level) - LEVEL_ORDER.index(candidate_level))
+            seniority_eligible = seniority_distance <= 1
+        elif LEVEL_ORDER.index(intelligence.level) >= LEVEL_ORDER.index("manager"):
+            seniority_eligible = False
+    eligible = family_eligible and seniority_eligible
+
     best_title_similarity = max(
         (cosine_similarity(variant, title) for variant in intelligence.equivalent_titles),
         default=0.0,
@@ -696,6 +741,14 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         "C": "sem evidência pública suficiente; confirmar antes de abordar",
     }[tier]
     ranked.update({
+        "eligible": eligible,
+        "eligibilityReason": (
+            "família profissional incompatível"
+            if not family_eligible else
+            "senioridade incompatível ou não comprovada no trecho público"
+            if not seniority_eligible else
+            "família profissional e senioridade compatíveis"
+        ),
         "tier": tier,
         "tierLabel": tier_label,
         "compatibility": compatibility,
@@ -723,7 +776,11 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
 
 def rank_candidates(job: dict[str, Any], candidates: Iterable[dict[str, Any]]) -> tuple[JobIntelligence, list[dict[str, Any]]]:
     intelligence = analyze_job(job)
-    ranked = [rank_candidate(job, intelligence, candidate) for candidate in candidates]
+    evaluated = [rank_candidate(job, intelligence, candidate) for candidate in candidates]
+    # Qualidade é prioridade: se nenhum perfil comprovar os requisitos mínimos,
+    # devolvemos uma lista vazia em vez de completar a quantidade solicitada com
+    # profissionais de outra carreira ou nível hierárquico.
+    ranked = [candidate for candidate in evaluated if candidate.get("eligible") is True]
     tier_rank = {"A": 0, "B": 1, "C": 2}
     ranked.sort(
         key=lambda item: (
