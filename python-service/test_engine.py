@@ -37,12 +37,40 @@ class TalentEngineTests(unittest.TestCase):
             },
         ]
         _, ranked = rank_candidates(self.job, candidates)
-        # O perfil equivalente lidera e o perfil de outra área é mantido na
-        # lista apenas ao final, com pontuação claramente inferior.
+        # Perfis de outra família profissional não são exibidos para completar
+        # artificialmente a quantidade solicitada.
         self.assertEqual("Ana", ranked[0]["name"])
-        self.assertEqual("Bruno", ranked[-1]["name"])
-        self.assertGreater(ranked[0]["compatibility"], ranked[-1]["compatibility"])
+        self.assertEqual(["Ana"], [candidate["name"] for candidate in ranked])
         self.assertEqual("Python 3 · motor multilíngue", ranked[0]["rankingEngine"])
+
+    def test_executive_hr_search_rejects_unrelated_and_junior_profiles(self):
+        job = {
+            **self.job,
+            "title": "Gerente Executivo de Recursos Humanos",
+            "description": (
+                "Liderança integral de Recursos Humanos no Brasil, HR Business Partner estratégico, "
+                "operação industrial, relações sindicais, engajamento, turnover, P&L de RH e "
+                "gestão da força de trabalho."
+            ),
+            "keywords": [],
+        }
+        candidates = [
+            {"name": "Diretora RH", "title": "HR Director", "company": "Indústria Alfa",
+             "summary": "Strategic HRBP, plant HR, labor relations, engagement and workforce planning"},
+            {"name": "Cleiton Ito", "title": "Analista de Recursos Humanos", "company": "Unilever",
+             "summary": "Analista de Recursos Humanos em São Paulo"},
+            {"name": "Christian", "title": "Senior Account Manager", "summary": "Business development"},
+            {"name": "Diogo", "title": "Coordenador de Suporte", "summary": "KPIs, Power BI e Excel"},
+            {"name": "Andreia", "title": "Trader", "summary": "Global commercial strategies"},
+            {"name": "Hellen", "title": "Fraud Analyst", "summary": "Fast-paced environments"},
+            {"name": "Claudia", "title": "Executive Assistant and Office Manager", "summary": "Office management"},
+        ]
+        intelligence, ranked = rank_candidates(job, candidates)
+        self.assertEqual("human_resources", intelligence.family)
+        self.assertEqual(["Diretora RH"], [candidate["name"] for candidate in ranked])
+        self.assertIn("HR Business Partner estratégico", intelligence.skills)
+        self.assertIn("Relações trabalhistas e sindicais", intelligence.skills)
+        self.assertIn("RH em operação industrial", intelligence.skills)
 
     def test_process_standardization_expands_titles_in_three_languages(self):
         job = {
@@ -96,21 +124,19 @@ class TalentEngineTests(unittest.TestCase):
         ]
         _, ranked = rank_candidates(job, candidates)
         # Quem evidencia todos os critérios obrigatórios ocupa as primeiras
-        # posições; quem não evidencia não é apagado, é rebaixado e sinalizado.
+        # posições; perfis de outra família profissional não são exibidos.
         top = [candidate["name"] for candidate in ranked[:3]]
         self.assertEqual(["Ana", "Carlos", "Diana"], sorted(top))
         self.assertTrue(all(candidate["tier"] == "A" for candidate in ranked[:3]))
         self.assertTrue(all(not candidate["missingRequiredKeywords"] for candidate in ranked[:3]))
         self.assertTrue(all(len(candidate["matchedRequiredKeywords"]) == 2 for candidate in ranked[:3]))
-        rebaixados = {candidate["name"]: candidate for candidate in ranked[3:]}
-        self.assertEqual({"Bruno", "Eduardo"}, set(rebaixados))
-        self.assertTrue(all(candidate["tier"] in {"B", "C"} for candidate in rebaixados.values()))
-        self.assertTrue(all(candidate["missingRequiredKeywords"] for candidate in rebaixados.values()))
+        self.assertNotIn("Eduardo", [candidate["name"] for candidate in ranked])
 
     def test_segment_company_evidence_improves_ranking(self):
         job = {
             **self.job,
             "title": "Analista Financeiro",
+            "description": "Planejamento financeiro, budget, forecast e análise de resultados.",
             "marketSegment": "beef_processing",
             "mappedCompanies": ["Minerva Foods", "JBS", "Marfrig"],
         }
@@ -155,9 +181,8 @@ class TalentEngineTests(unittest.TestCase):
         ]
         _, ranked = rank_candidates(job, candidates)
         self.assertEqual("Gerente", ranked[0]["name"])
-        self.assertGreater(ranked[0]["compatibility"], ranked[1]["compatibility"])
+        self.assertEqual(["Gerente"], [candidate["name"] for candidate in ranked])
         self.assertIn("senioridade compatível", ranked[0]["matchReason"])
-        self.assertIn("senioridade distante", ranked[1]["matchReason"])
 
     def test_skill_explanation_never_reports_more_matches_than_the_denominator(self):
         job = {
