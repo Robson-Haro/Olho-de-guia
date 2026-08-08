@@ -410,7 +410,7 @@ export default function HomePage() {
         pythonPrepared = true;
         setSearchMessage("Cargos equivalentes identificados. Consultando perfis públicos do LinkedIn...");
       } catch {
-        // A busca permanece disponível com o mecanismo TypeScript anterior.
+        throw new Error("O motor de leitura e senioridade está indisponível. A busca foi interrompida para não exibir candidatos sem validação.");
       }
       const response = await fetch("/api/search", {
         method: "POST",
@@ -445,6 +445,7 @@ export default function HomePage() {
         } catch {
           setPythonRankingActive(false);
           setPythonEvaluatedCount(0);
+          throw new Error("Os perfis foram encontrados, mas o motor de aderência não conseguiu validá-los. Nenhum candidato foi exibido.");
         }
       }
       const queriesUsed = Array.isArray(data.providers)

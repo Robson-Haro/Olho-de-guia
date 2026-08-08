@@ -105,6 +105,20 @@ LEVEL_ORDER = tuple(LEVELS)
 
 
 ROLE_FAMILIES: dict[str, dict[str, Any]] = {
+    "compensation_benefits": {
+        "label": "Remuneração, Benefícios e Total Rewards",
+        "functions": {
+            "pt": ("remuneração e benefícios", "remuneração", "benefícios", "cargos e salários"),
+            "en": ("compensation and benefits", "total rewards", "compensation", "employee benefits"),
+            "es": ("compensación y beneficios", "compensación", "beneficios", "recompensa total"),
+        },
+        "signals": (
+            "total rewards", "compensation and benefits", "comp & ben", "c&b",
+            "job evaluation", "avaliacao de cargos", "hay", "mercer", "willis towers watson",
+            "salary survey", "pesquisa salarial", "estrutura salarial", "incentivos de longo prazo",
+            "long term incentive", "short term incentive", "remuneracao executiva",
+        ),
+    },
     "people_operations": {
         "label": "Administração de Pessoal / People Operations",
         "functions": {
@@ -317,6 +331,27 @@ SKILL_GROUPS: dict[str, tuple[str, ...]] = {
     "Budget e forecast": ("budget", "forecast", "orcamento", "previsao"),
     "Recrutamento e seleção": ("recrutamento", "recruitment", "recruiting", "reclutamiento", "selecao"),
     "Clima e engajamento": ("clima", "engajamento", "engagement", "compromiso"),
+    "Estratégia de Total Rewards": (
+        "total rewards", "estrategia de remuneracao", "compensation strategy",
+        "reward strategy", "estrategia de compensacion", "recompensa total",
+    ),
+    "Remuneração executiva e incentivos": (
+        "remuneracao executiva", "executive compensation", "compensacion ejecutiva",
+        "incentivo de curto prazo", "short term incentive", "sti",
+        "incentivo de longo prazo", "long term incentive", "lti",
+    ),
+    "Arquitetura de cargos e salários": (
+        "cargos e salarios", "arquitetura de cargos", "job architecture", "job evaluation",
+        "avaliacao de cargos", "hay methodology", "metodologia hay", "job grading",
+    ),
+    "Pesquisa e competitividade salarial": (
+        "pesquisa salarial", "salary survey", "market pricing", "benchmark salarial",
+        "competitividade salarial", "compensation benchmarking",
+    ),
+    "Benefícios corporativos": (
+        "beneficios corporativos", "employee benefits", "benefits strategy",
+        "gestao de beneficios", "benefits management", "beneficios para empleados",
+    ),
     "HR Business Partner estratégico": (
         "hr business partner", "hrbp", "business partner de rh", "strategic hr business partner",
         "people business partner", "socio estrategico de recursos humanos",
