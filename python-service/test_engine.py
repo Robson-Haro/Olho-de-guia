@@ -114,6 +114,10 @@ class TalentEngineTests(unittest.TestCase):
         self.assertIn("Head of Total Rewards", intelligence.equivalent_titles)
         self.assertIn("Compensation and Benefits Director", intelligence.equivalent_titles)
         self.assertIn("Senior Compensation Benefits and Payroll Manager", intelligence.equivalent_titles)
+        self.assertLess(
+            intelligence.equivalent_titles.index("Head of Total Rewards"),
+            intelligence.equivalent_titles.index("Head de Remuneração e Benefícios"),
+        )
         self.assertNotIn("Engineering Manager", intelligence.equivalent_titles)
 
     def test_daniel_pattern_is_eligible_but_pure_payroll_manager_is_rejected(self):

@@ -144,6 +144,17 @@ ROLE_FAMILIES: dict[str, dict[str, Any]] = {
                 "Gerente Senior de Compensación y Beneficios",
             ),
         },
+        # Ordem usada nas primeiras consultas do Serper. Alternar idioma e
+        # senioridade aumenta cobertura sem transformar a busca em RH genérico.
+        "search_titles": (
+            "Head of Total Rewards",
+            "Gerente Sênior de Remuneração e Benefícios",
+            "Compensation and Benefits Director",
+            "Senior Compensation and Benefits Manager",
+            "Diretor de Total Rewards",
+            "Senior Compensation Benefits and Payroll Manager",
+            "Global Total Rewards Head",
+        ),
     },
     "people_operations": {
         "label": "Administração de Pessoal / People Operations",
@@ -566,6 +577,7 @@ def equivalent_titles(title: str, family_key: str | None, level: str | None) -> 
     # Em famílias com nomenclatura muito variável, as alternativas curadas têm
     # precedência sobre combinações mecânicas. O título original permanece em
     # primeiro lugar para preservar a intenção informada pelo recrutador.
+    variants.extend(family.get("search_titles", ()))
     for language in ("pt", "en", "es"):
         variants.extend(family.get("curated_titles", {}).get(language, ()))
     if level:

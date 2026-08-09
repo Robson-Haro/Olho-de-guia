@@ -768,7 +768,7 @@ function buildSearchPlan(input: TalentSearchInput) {
 
   // Camada 2 — variantes de cargo com apenas o conceito mais distintivo. Exigir
   // todos os critérios no snippet do Google diminuía demais a cobertura.
-  for (const variant of titles.slice(1, 4)) {
+  for (const variant of titles.slice(1, 6)) {
     push(`${exactPhrase(variant)} ${discoveryConcept} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "variante");
   }
 
@@ -778,7 +778,7 @@ function buildSearchPlan(input: TalentSearchInput) {
     const levelExpression = jobLevel
       ? `(${jobLevel.terms.slice(0, 4).map(exactPhrase).filter(Boolean).join(" OR ")})`
       : "";
-    push(`${semanticExpression} ${levelExpression} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "dominio");
+    push(`${discoveryConcept || semanticExpression} ${levelExpression} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "dominio");
   }
 
   // Camada 4 — profundidade progressiva. A página 2 mantém o conceito mais
