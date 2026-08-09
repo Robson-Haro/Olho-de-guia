@@ -72,6 +72,80 @@ class TalentEngineTests(unittest.TestCase):
         self.assertIn("Relações trabalhistas e sindicais", intelligence.skills)
         self.assertIn("RH em operação industrial", intelligence.skills)
 
+    def test_total_rewards_head_rejects_hr_generalists_and_junior_candidates(self):
+        job = {
+            **self.job,
+            "title": "Gerente Executivo de Remuneração e Benefícios",
+            "description": (
+                "Responsável pela estratégia de Total Rewards, remuneração executiva, benefícios, "
+                "arquitetura de cargos, pesquisa salarial, incentivos de curto e longo prazo e governança global."
+            ),
+            "keywords": [],
+        }
+        candidates = [
+            {"name": "Head Total Rewards", "title": "Head of Total Rewards", "company": "Indústria Alfa",
+             "summary": "Executive compensation, benefits strategy, job architecture, salary surveys, STI and LTI"},
+            {"name": "Gerente C&B", "title": "Gerente de Remuneração e Benefícios", "company": "Indústria Beta",
+             "summary": "Estratégia de remuneração, benefícios corporativos, cargos e salários e incentivos"},
+            {"name": "Gerente RH", "title": "Gerente de Recursos Humanos", "company": "Indústria Gama",
+             "summary": "HRBP, recrutamento, treinamento, clima e relações trabalhistas"},
+            {"name": "Analista C&B", "title": "Analista de Remuneração e Benefícios", "company": "Indústria Delta",
+             "summary": "Pesquisa salarial, benefícios e cargos e salários"},
+            {"name": "Analista RH", "title": "Analista de Recursos Humanos", "company": "Unilever",
+             "summary": "Rotinas de recursos humanos"},
+        ]
+        intelligence, ranked = rank_candidates(job, candidates)
+        self.assertEqual("compensation_benefits", intelligence.family)
+        self.assertEqual({"Head Total Rewards", "Gerente C&B"}, {candidate["name"] for candidate in ranked})
+        self.assertNotIn("Gerente RH", [candidate["name"] for candidate in ranked])
+        self.assertNotIn("Analista C&B", [candidate["name"] for candidate in ranked])
+        self.assertTrue(all(candidate["compatibility"] >= 60 for candidate in ranked))
+        self.assertIn("Estratégia de Total Rewards", intelligence.skills)
+        self.assertIn("Remuneração executiva e incentivos", intelligence.skills)
+
+    def test_total_rewards_expands_market_titles_including_daniel_pattern(self):
+        intelligence = analyze_job({
+            **self.job,
+            "title": "Gerente Executivo de Remuneração",
+            "description": "Total Rewards, remuneração variável, remuneração executiva, benefícios, STI e LTI.",
+            "keywords": ["remuneração variável"],
+        })
+        self.assertEqual("compensation_benefits", intelligence.family)
+        self.assertIn("Head of Total Rewards", intelligence.equivalent_titles)
+        self.assertIn("Compensation and Benefits Director", intelligence.equivalent_titles)
+        self.assertIn("Senior Compensation Benefits and Payroll Manager", intelligence.equivalent_titles)
+        self.assertNotIn("Engineering Manager", intelligence.equivalent_titles)
+
+    def test_daniel_pattern_is_eligible_but_pure_payroll_manager_is_rejected(self):
+        job = {
+            **self.job,
+            "title": "Head de Remuneração e Benefícios",
+            "description": "Liderar Total Rewards, remuneração variável, benefícios e remuneração executiva.",
+            "keywords": ["Total Rewards", "remuneração variável"],
+        }
+        candidates = [
+            {
+                "name": "Perfil como Daniel",
+                "title": "Senior Compensation, Benefits and Payroll Manager",
+                "company": "Empresa Global",
+                "summary": "Lidero estratégias de Total Rewards, benefícios, remuneração variável, STI e LTI",
+            },
+            {
+                "name": "Payroll puro",
+                "title": "Payroll Manager",
+                "company": "Empresa Global",
+                "summary": "Folha de pagamento, encargos, ponto, admissão e rescisão",
+            },
+            {
+                "name": "Engenharia",
+                "title": "Senior Software Engineering Manager",
+                "company": "Empresa Global",
+                "summary": "Liderança de engenharia de software e arquitetura de sistemas",
+            },
+        ]
+        _, ranked = rank_candidates(job, candidates)
+        self.assertEqual(["Perfil como Daniel"], [candidate["name"] for candidate in ranked])
+
     def test_process_standardization_expands_titles_in_three_languages(self):
         job = {
             **self.job,

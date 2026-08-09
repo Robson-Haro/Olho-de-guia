@@ -74,7 +74,7 @@ export async function POST(request: Request) {
       ? body.keywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 4)
       : [];
     const titleVariants = Array.isArray(body.titleVariants)
-      ? body.titleVariants.map((item) => clean(item, 150)).filter(Boolean).slice(0, 10)
+      ? body.titleVariants.map((item) => clean(item, 150)).filter(Boolean).slice(0, 16)
       : [];
     const semanticKeywords = Array.isArray(body.semanticKeywords)
       ? body.semanticKeywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 12)

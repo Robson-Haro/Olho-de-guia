@@ -105,6 +105,46 @@ LEVEL_ORDER = tuple(LEVELS)
 
 
 ROLE_FAMILIES: dict[str, dict[str, Any]] = {
+    "compensation_benefits": {
+        "label": "Remuneração, Benefícios e Total Rewards",
+        "functions": {
+            "pt": ("remuneração e benefícios", "remuneração", "benefícios", "cargos e salários"),
+            "en": ("compensation and benefits", "total rewards", "compensation", "employee benefits"),
+            "es": ("compensación y beneficios", "compensación", "beneficios", "recompensa total"),
+        },
+        "signals": (
+            "total rewards", "compensation and benefits", "comp & ben", "c&b",
+            "job evaluation", "avaliacao de cargos", "hay", "mercer", "willis towers watson",
+            "salary survey", "pesquisa salarial", "estrutura salarial", "incentivos de longo prazo",
+            "long term incentive", "short term incentive", "remuneracao executiva",
+        ),
+        # Títulos praticados no mercado não seguem uma única ordem de palavras.
+        # Esta base curada evita depender de combinações genéricas e cobre o
+        # padrão encontrado no perfil do Daniel (Senior C&B/Payroll Manager).
+        "curated_titles": {
+            "pt": (
+                "Head de Remuneração e Benefícios",
+                "Gerente Executivo de Remuneração e Benefícios",
+                "Gerente Sênior de Remuneração e Benefícios",
+                "Diretor de Remuneração e Benefícios",
+                "Head de Total Rewards",
+                "Diretor de Total Rewards",
+            ),
+            "en": (
+                "Head of Total Rewards",
+                "Total Rewards Director",
+                "Compensation and Benefits Director",
+                "Senior Compensation and Benefits Manager",
+                "Senior Compensation Benefits and Payroll Manager",
+                "Global Total Rewards Head",
+            ),
+            "es": (
+                "Head de Compensación y Beneficios",
+                "Director de Compensación y Beneficios",
+                "Gerente Senior de Compensación y Beneficios",
+            ),
+        },
+    },
     "people_operations": {
         "label": "Administração de Pessoal / People Operations",
         "functions": {
@@ -317,6 +357,27 @@ SKILL_GROUPS: dict[str, tuple[str, ...]] = {
     "Budget e forecast": ("budget", "forecast", "orcamento", "previsao"),
     "Recrutamento e seleção": ("recrutamento", "recruitment", "recruiting", "reclutamiento", "selecao"),
     "Clima e engajamento": ("clima", "engajamento", "engagement", "compromiso"),
+    "Estratégia de Total Rewards": (
+        "total rewards", "estrategia de remuneracao", "compensation strategy",
+        "reward strategy", "estrategia de compensacion", "recompensa total",
+    ),
+    "Remuneração executiva e incentivos": (
+        "remuneracao executiva", "executive compensation", "compensacion ejecutiva",
+        "incentivo de curto prazo", "short term incentive", "sti",
+        "incentivo de longo prazo", "long term incentive", "lti",
+    ),
+    "Arquitetura de cargos e salários": (
+        "cargos e salarios", "arquitetura de cargos", "job architecture", "job evaluation",
+        "avaliacao de cargos", "hay methodology", "metodologia hay", "job grading",
+    ),
+    "Pesquisa e competitividade salarial": (
+        "pesquisa salarial", "salary survey", "market pricing", "benchmark salarial",
+        "competitividade salarial", "compensation benchmarking",
+    ),
+    "Benefícios corporativos": (
+        "beneficios corporativos", "employee benefits", "benefits strategy",
+        "gestao de beneficios", "benefits management", "beneficios para empleados",
+    ),
     "HR Business Partner estratégico": (
         "hr business partner", "hrbp", "business partner de rh", "strategic hr business partner",
         "people business partner", "socio estrategico de recursos humanos",
@@ -502,6 +563,11 @@ def equivalent_titles(title: str, family_key: str | None, level: str | None) -> 
 
     family = ROLE_FAMILIES[family_key]
     functions = family["functions"]
+    # Em famílias com nomenclatura muito variável, as alternativas curadas têm
+    # precedência sobre combinações mecânicas. O título original permanece em
+    # primeiro lugar para preservar a intenção informada pelo recrutador.
+    for language in ("pt", "en", "es"):
+        variants.extend(family.get("curated_titles", {}).get(language, ()))
     if level:
         # Primeiro uma alternativa por idioma. As quatro primeiras consultas
         # cobrem o título original, português, inglês e espanhol.
@@ -524,7 +590,7 @@ def equivalent_titles(title: str, family_key: str | None, level: str | None) -> 
     else:
         for language in ("pt", "en", "es"):
             variants.extend(title_case(value) for value in functions[language][:3])
-    return unique(variants)[:10]
+    return unique(variants)[:16]
 
 
 def detected_skills(description: str, explicit_keywords: Iterable[str] = ()) -> list[str]:
