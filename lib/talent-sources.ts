@@ -1,6 +1,7 @@
 import { getSecret, saveSecret } from "@/lib/secure-settings";
 import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
 import { getMarketSegment } from "@/lib/market-segments";
+import { extractExplicitCurrentLocation, isExcludedCandidateName } from "@/lib/search-guardrails";
 
 export type TalentProvider = "serper";
 
@@ -295,14 +296,32 @@ export function locationFromText(value: string) {
 }
 
 function geographicEvidence(value: string, input: TalentSearchInput, searchedLocations: string[] = []) {
-  const normalized = normalizeGeographyText(value);
   const profile = getCountryProfile(input.countryCode);
+  const explicitLocation = extractExplicitCurrentLocation(value);
+  // O início do resultado público representa o cabeçalho atual. Experiências
+  // antigas aparecem depois e não podem confirmar residência.
+  const evidenceText = explicitLocation || plain(value).slice(0, 320);
+  const normalized = normalizeGeographyText(evidenceText);
   const matchedCity = input.cities.find((city) => includesNormalized(normalized, city)) || "";
   const matchedSubdivision = input.subdivision && includesNormalized(normalized, input.subdivision)
     ? input.subdivision
     : "";
   const matchedCountry = profile.aliases.some((alias) => includesNormalized(normalized, alias));
-  const brazilLocation = input.countryCode === "BR" ? locationFromText(value) : { city: "", state: "" };
+  const explicitLocationIsDivergent = Boolean(
+    explicitLocation && !matchedCity && !matchedSubdivision && !matchedCountry,
+  );
+
+  if (explicitLocationIsDivergent) {
+    return {
+      city: "",
+      state: "",
+      country: "",
+      geographicMatch: "unknown" as const,
+      geographicLabel: `localização atual divergente: ${explicitLocation}`,
+    };
+  }
+
+  const brazilLocation = input.countryCode === "BR" ? locationFromText(evidenceText) : { city: "", state: "" };
   const city = matchedCity || brazilLocation.city;
   const state = matchedSubdivision || brazilLocation.state;
   const country = city || state || matchedCountry ? profile.name : "";
@@ -316,14 +335,14 @@ function geographicEvidence(value: string, input: TalentSearchInput, searchedLoc
           ? "targeted"
           : "unknown";
   const geographicLabel = matchedCity
-    ? `cidade confirmada: ${matchedCity}`
+    ? `cidade atual confirmada: ${matchedCity}`
     : matchedSubdivision
-      ? `${profile.subdivisionLabel.toLowerCase()} confirmado(a): ${matchedSubdivision}`
+      ? `${profile.subdivisionLabel.toLowerCase()} atual confirmado(a): ${matchedSubdivision}`
       : matchedCountry
-        ? `país confirmado: ${profile.name}`
+        ? `país atual confirmado: ${profile.name}`
         : searchedLocations.length
-          ? `consulta direcionada a ${searchedLocations.join(", ")}; confirmar no perfil`
-          : "localidade não confirmada no trecho público";
+          ? `consulta direcionada a ${searchedLocations.join(", ")}; localização não confirmada`
+          : "localidade atual não confirmada no trecho público";
   return { city, state, country, geographicMatch, geographicLabel };
 }
 
@@ -612,6 +631,7 @@ function serperCandidate(
   const profileUrl = linkedinProfileUrl(result.link);
   if (!profileUrl) return null;
   const professional = parseProfessionalTitle(result.title);
+  if (isExcludedCandidateName(professional.name, input.description)) return null;
   const summary = plain(result.snippet);
   const publicText = [plain(result.title), summary].filter(Boolean).join(" · ");
   const location = geographicEvidence(publicText, input, searchedLocations);
@@ -663,7 +683,7 @@ type SerperSearch = {
   query: string;
   page: number;
   targetCities: string[];
-  layer: "ancora" | "variante" | "dominio" | "profundidade";
+  layer: "ancora" | "variante" | "dominio" | "profundidade" | "adaptativa";
 };
 
 function simplifiedTitle(value: string) {
@@ -793,7 +813,49 @@ function buildSearchPlan(input: TalentSearchInput) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, SEARCH_BUDGET);
+  }).slice(0, Math.max(4, SEARCH_BUDGET - 4));
+}
+
+/**
+ * Segunda rodada orientada pelos resultados: reutiliza os títulos dos perfis
+ * mais aderentes e combina cada um com conceitos ainda pouco evidenciados.
+ * O aprendizado é limitado à busca atual, auditável e não altera pesos globais.
+ */
+function buildAdaptiveSearchPlan(
+  input: TalentSearchInput,
+  candidates: TalentCandidate[],
+  usedSearches: SerperSearch[],
+) {
+  const used = new Set(usedSearches.map((item) => `${item.query.toLowerCase()}|${item.page}`));
+  const concepts = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts);
+  const conceptExpression = concepts
+    .slice(0, 3)
+    .map((concept) => {
+      const aliases = concept.aliases.slice(0, 5).map(exactPhrase).filter(Boolean);
+      return aliases.length > 1 ? `(${aliases.join(" OR ")})` : aliases[0] || "";
+    })
+    .filter(Boolean)
+    .join(" ");
+  const learnedTitles = unique(
+    orderCandidates(candidates)
+      .map((candidate) => naturalSearchTerm(candidate.title))
+      .filter((title) => title && !/^perfil profissional/i.test(title))
+      .slice(0, 8),
+  );
+  const fallbackTitles = titleVariants(input.title, input.titleVariants).slice(1, 8);
+  const titles = unique([...learnedTitles, ...fallbackTitles]);
+  const cityGroups = input.countrywide ? [[]] : citySearchGroups(input.cities);
+  const searches: SerperSearch[] = [];
+
+  for (const [index, title] of titles.entries()) {
+    const targetCities = cityGroups[index % cityGroups.length] || [];
+    const query = `site:linkedin.com/in ${exactPhrase(title)} ${conceptExpression} ${geographicQuery(input, targetCities)}`
+      .replace(/\s+/g, " ")
+      .trim();
+    const key = `${query.toLowerCase()}|1`;
+    if (!used.has(key)) searches.push({ query, page: 1, targetCities, layer: "adaptativa" });
+  }
+  return searches.slice(0, Math.max(0, SEARCH_BUDGET - usedSearches.length));
 }
 
 const responseCache = new Map<string, { at: number; payload: Record<string, unknown> | null }>();
@@ -923,6 +985,29 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
     // linha — nunca antes de ter material suficiente para ranquear.
     const strongCandidates = deduplicate(pool).filter((candidate) => candidate.tier === "A");
     if (strongCandidates.length >= maxCandidates * 3) break;
+  }
+
+  const initialRanked = orderCandidates(deduplicate(pool));
+  const initialStrong = initialRanked.filter((candidate) => candidate.tier === "A" || candidate.tier === "B");
+  const shouldAdapt = initialRanked.length < maxCandidates * 2 || initialStrong.length < maxCandidates;
+  if (shouldAdapt && talentQueries < SEARCH_BUDGET) {
+    const adaptivePlan = buildAdaptiveSearchPlan(enrichedInput, initialRanked, plan)
+      .slice(0, SEARCH_BUDGET - talentQueries);
+    for (let index = 0; index < adaptivePlan.length; index += PARALLEL_BATCH) {
+      const batch = adaptivePlan.slice(index, index + PARALLEL_BATCH);
+      const settled = await Promise.allSettled(
+        batch.map((item) => callSerper(apiKey, item.query, RESULTS_PER_QUERY, item.page, input.countryCode)),
+      );
+      settled.forEach((outcome, batchIndex) => {
+        if (outcome.status === "fulfilled") {
+          queries += 1;
+          talentQueries += 1;
+          pool = pool.concat(parsePayload(outcome.value, batch[batchIndex], plan.length + index + batchIndex));
+        } else if (!firstError) {
+          firstError = outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason));
+        }
+      });
+    }
   }
 
   if (!talentQueries) {

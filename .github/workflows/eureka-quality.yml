@@ -1,0 +1,30 @@
+name: Eureka Quality
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - agent/eureka-busca-adaptativa
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run regression tests
+        run: npm test
+      - name: Build application
+        run: npm run build
