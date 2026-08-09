@@ -48,6 +48,15 @@ const COMPLEXITY_SIGNALS = [
   "long term incentive", "lti", "mercer", "korn ferry", "hay group", "job evaluation",
 ];
 
+const ROLE_EQUIVALENTS: Record<string, string[]> = {
+  remuneracao: ["remuneracao", "compensation", "rewards"],
+  beneficios: ["beneficios", "benefits"],
+  total: ["total"],
+  rewards: ["rewards", "remuneracao", "compensation"],
+  compensation: ["compensation", "remuneracao", "rewards"],
+  benefits: ["benefits", "beneficios"],
+};
+
 const STOP = new Set([
   "de", "da", "do", "das", "dos", "e", "em", "para", "com", "the", "of", "and",
   "senior", "senior", "executivo", "executiva", "executive", "gerente", "manager",
@@ -93,7 +102,9 @@ function signalEvidence(text: string, signals: string[]) {
 export function assessCandidateEvidence(input: EvidenceAssessmentInput): EvidenceAssessment {
   const candidateText = [input.candidateTitle, input.candidateText].filter(Boolean).join(" · ");
   const jobTokens = roleTokens(input.jobTitle);
-  const matchedRoleTokens = jobTokens.filter((token) => contains(input.candidateTitle, token));
+  const matchedRoleTokens = jobTokens.filter((token) =>
+    (ROLE_EQUIVALENTS[token] || [token]).some((alias) => contains(input.candidateTitle, alias)),
+  );
   const roleCoverage = jobTokens.length ? matchedRoleTokens.length / jobTokens.length : 0;
   const roleScore = Math.round(25 * roleCoverage);
 
