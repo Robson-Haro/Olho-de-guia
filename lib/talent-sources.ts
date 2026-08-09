@@ -2,6 +2,7 @@ import { getSecret, saveSecret } from "@/lib/secure-settings";
 import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
 import { getMarketSegment } from "@/lib/market-segments";
 import { extractExplicitCurrentLocation, isExcludedCandidateName } from "@/lib/search-guardrails";
+import { assessCandidateEvidence, type CandidateEvidence } from "@/lib/evidence-scoring";
 
 export type TalentProvider = "serper";
 
@@ -48,6 +49,10 @@ export type TalentCandidate = {
   tier?: CandidateTier;
   tierLabel?: string;
   seniorityLabel?: string;
+  eligible?: boolean;
+  fitClassification?: "high" | "validate" | "expansion" | "rejected";
+  rejectionReasons?: string[];
+  evidence?: CandidateEvidence[];
   scoreBreakdown?: {
     cargo: number;
     senioridade: number;
@@ -541,10 +546,23 @@ function calculateCompatibility(
   const mappedCompanies = unique((input.mappedCompanies || []).map(naturalSearchTerm).filter(Boolean));
   const matchedCompany = mappedCompanies.find((company) => includesNormalized(candidateText, company));
   const segmentScore = input.marketSegment ? (matchedCompany ? 10 : 2) : 0;
-  const compatibility = Math.max(
+  const legacyCompatibility = Math.max(
     0,
     Math.min(100, role.score + seniority.score + keywordScore + locationScore + segmentScore - noise.penalty),
   );
+  const evidenceAssessment = assessCandidateEvidence({
+    jobTitle: input.title,
+    candidateTitle: candidate.title,
+    candidateText,
+    requiredConcepts: requiredEvidence.concepts,
+    geographicMatch: candidate.geographicMatch || "unknown",
+    geographicLabel: candidate.geographicLabel,
+  });
+  // A evidência governa 75% da nota. O ranking legado contribui apenas como
+  // desempate; nunca consegue compensar uma reprovação eliminatória.
+  const compatibility = evidenceAssessment.eligible
+    ? Math.round((evidenceAssessment.score * 0.75) + (legacyCompatibility * 0.25))
+    : Math.min(54, evidenceAssessment.score);
 
   const tier: CandidateTier = !requiredEvidence.concepts.length
     ? "A"
@@ -576,6 +594,10 @@ function calculateCompatibility(
     tier,
     tierLabel,
     seniorityLabel: candidateLevel?.label || "",
+    eligible: evidenceAssessment.eligible,
+    fitClassification: evidenceAssessment.classification,
+    rejectionReasons: evidenceAssessment.rejectionReasons,
+    evidence: evidenceAssessment.evidence,
     scoreBreakdown: {
       cargo: role.score,
       senioridade: seniority.score,
@@ -650,6 +672,9 @@ function serperCandidate(
   // e senioridade. Localização e termos genéricos não compensam incompatibilidade.
   if (!passesMinimumProfessionalFit(baseCandidate, input)) return null;
   const score = calculateCompatibility(baseCandidate, input);
+  // Elegibilidade vem antes da nota: palavras, localização ou empresa não podem
+  // compensar cargo funcional, senioridade ou geografia explicitamente errados.
+  if (!score.eligible) return null;
 
   // O trecho público do Google tem cerca de 160 caracteres. Eliminar de forma
   // definitiva quem não repete ali todas as palavras obrigatórias produzia
