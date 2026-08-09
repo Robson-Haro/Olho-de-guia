@@ -1,6 +1,7 @@
 import { getSecret, saveSecret } from "@/lib/secure-settings";
 import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
 import { getMarketSegment } from "@/lib/market-segments";
+import { extractExplicitCurrentLocation, isExcludedCandidateName } from "@/lib/search-guardrails";
 
 export type TalentProvider = "serper";
 
@@ -294,14 +295,9 @@ export function locationFromText(value: string) {
   return { city: "", state: "" };
 }
 
-function explicitCurrentLocation(value: string) {
-  const match = plain(value).match(/\b(?:location|localiza(?:ç|c)[aã]o|ubicaci[oó]n)\s*:\s*([^·;|\n]{2,100})/i);
-  return match ? normalizeLocation(match[1].replace(/\.{3,}.*$/, "")) : "";
-}
-
 function geographicEvidence(value: string, input: TalentSearchInput, searchedLocations: string[] = []) {
   const profile = getCountryProfile(input.countryCode);
-  const explicitLocation = explicitCurrentLocation(value);
+  const explicitLocation = extractExplicitCurrentLocation(value);
   // O início do resultado público representa o cabeçalho atual. Experiências
   // antigas aparecem depois e não podem confirmar residência.
   const evidenceText = explicitLocation || plain(value).slice(0, 320);
@@ -397,27 +393,6 @@ function descriptionTerms(description: string) {
 
 function includesNormalized(text: string, value: string) {
   return withoutAccents(text).includes(withoutAccents(value));
-}
-
-function excludedCandidateNames(description: string) {
-  const section = plain(description).match(
-    /\bexcluir\s+(?:os\s+)?candidatos?[^:\n]*:\s*([^\.\n]+)/i,
-  )?.[1] || "";
-  if (!section) return [] as string[];
-  return unique(
-    section
-      .split(/\s*(?:,|;|\be\b|\band\b|\by\b)\s*/i)
-      .map((name) => name.replace(/^[\s:–—-]+|[\s:–—-]+$/g, "").trim())
-      .filter((name) => name.split(/\s+/).length >= 2 && name.length <= 100),
-  );
-}
-
-function isExcludedCandidate(name: string, description: string) {
-  const normalizedName = withoutAccents(name).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-  return excludedCandidateNames(description).some((excluded) => {
-    const normalizedExcluded = withoutAccents(excluded).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-    return normalizedExcluded === normalizedName;
-  });
 }
 
 function requiredKeywordConcepts(values: string[], supplied: RequiredKeywordConcept[] = []) {
@@ -656,7 +631,7 @@ function serperCandidate(
   const profileUrl = linkedinProfileUrl(result.link);
   if (!profileUrl) return null;
   const professional = parseProfessionalTitle(result.title);
-  if (isExcludedCandidate(professional.name, input.description)) return null;
+  if (isExcludedCandidateName(professional.name, input.description)) return null;
   const summary = plain(result.snippet);
   const publicText = [plain(result.title), summary].filter(Boolean).join(" · ");
   const location = geographicEvidence(publicText, input, searchedLocations);
