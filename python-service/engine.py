@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 import re
 import unicodedata
@@ -173,6 +174,27 @@ ROLE_FAMILIES: dict[str, dict[str, Any]] = {
             "es": ("atracción de talento", "reclutamiento y selección", "selección de personal"),
         },
         "signals": ("sourcing", "hunter", "entrevista", "shortlist", "linkedin recruiter", "gupy"),
+    },
+    "business_partner": {
+        "label": "Business Partner / HRBP",
+        "functions": {
+            "pt": ("business partner", "parceiro de negocio", "parceria com o negocio", "hr business partner"),
+            "en": ("hr business partner", "people business partner", "human resources business partner"),
+            "es": ("business partner de recursos humanos", "socio estrategico de recursos humanos", "business partner de personas"),
+        },
+        # Não basta pertencer a RH: este grupo exige evidência de atuação em
+        # parceria com o negócio. Assim, "Gerente de RH" não vira resultado de
+        # uma busca por BP apenas por ter senioridade semelhante.
+        "signals": ("hrbp", "business partner", "parceiro de negocio", "parceria com o negocio", "people partner"),
+        "curated_titles": {
+            "pt": ("Business Partner de RH", "HR Business Partner", "Business Partner de Pessoas e Cultura"),
+            "en": ("HR Business Partner", "People Business Partner", "Human Resources Business Partner"),
+            "es": ("Business Partner de Recursos Humanos", "Socio Estrategico de Recursos Humanos"),
+        },
+        "search_titles": (
+            "HR Business Partner", "People Business Partner", "Business Partner de RH",
+            "Business Partner de Pessoas e Cultura", "Human Resources Business Partner",
+        ),
     },
     "human_resources": {
         "label": "Recursos Humanos / Human Resources",
@@ -434,19 +456,32 @@ class JobIntelligence:
     required_keywords: tuple[KeywordConcept, ...]
 
 
+@lru_cache(maxsize=20_000)
+def _normalize_cached(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = normalized.lower().replace("&", " e ")
+    return re.sub(r"[^a-z0-9+#]+", " ", normalized).strip()
+
+
 def normalize(value: Any) -> str:
-    text = str(value or "")
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(char for char in text if not unicodedata.combining(char))
-    text = text.lower().replace("&", " e ")
-    return re.sub(r"[^a-z0-9+#]+", " ", text).strip()
+    # `normalize` é chamada dezenas de milhares de vezes por busca (cada perfil
+    # × cada título equivalente × cada família profissional). Sem cache, a
+    # normalização Unicode dominava o tempo de resposta do serviço Python.
+    return _normalize_cached(str(value or ""))
+
+
+# Conjunto fixo: era reconstruído a cada chamada de `tokens`, dentro dos laços
+# mais quentes do motor.
+SENSITIVE_TOKENS = frozenset(
+    token for phrase in SENSITIVE_PHRASES for token in normalize(phrase).split()
+)
 
 
 def tokens(value: Any) -> list[str]:
-    sensitive_tokens = {token for phrase in SENSITIVE_PHRASES for token in normalize(phrase).split()}
     return [
         token for token in normalize(value).split()
-        if len(token) > 2 and token not in STOP_WORDS and token not in sensitive_tokens
+        if len(token) > 2 and token not in STOP_WORDS and token not in SENSITIVE_TOKENS
     ]
 
 
@@ -462,13 +497,20 @@ def unique(values: Iterable[str]) -> list[str]:
     return result
 
 
+@lru_cache(maxsize=20_000)
+def _phrase_pattern(normalized_phrase: str) -> re.Pattern[str]:
+    # Limites léxicos evitam falsos positivos graves: por exemplo, "cto"
+    # (Chief Technology Officer) não pode ser encontrado dentro de "director".
+    return re.compile(rf"(?:^|\s){re.escape(normalized_phrase)}(?:$|\s)")
+
+
 def phrase_in(text: str, phrase: str) -> bool:
     normalized_phrase = normalize(phrase)
     if not normalized_phrase:
         return False
-    # Limites léxicos evitam falsos positivos graves: por exemplo, "cto"
-    # (Chief Technology Officer) não pode ser encontrado dentro de "director".
-    return bool(re.search(rf"(?:^|\s){re.escape(normalized_phrase)}(?:$|\s)", normalize(text)))
+    # A compilação do padrão também é cacheada: antes, cada verificação
+    # recompilava a expressão regular do zero.
+    return bool(_phrase_pattern(normalized_phrase).search(normalize(text)))
 
 
 def is_sensitive(value: str) -> bool:
@@ -541,6 +583,12 @@ def family_phrases(family: dict[str, Any]) -> list[str]:
 def detect_family(title: str, description: str = "") -> str | None:
     title_text = normalize(title)
     description_text = normalize(description)
+    # Business Partner é uma especialidade de RH, não sinônimo de qualquer
+    # posição gerencial de RH. A prioridade evita a classificação ampla de RH
+    # e, consequentemente, impede que gestores generalistas avancem na busca.
+    bp_terms = (*family_phrases(ROLE_FAMILIES["business_partner"]), *ROLE_FAMILIES["business_partner"]["signals"])
+    if any(phrase_in(title_text, term) for term in bp_terms):
+        return "business_partner"
     if re.search(r"\bhr\b", title_text):
         return "human_resources"
     scores: dict[str, float] = {}
@@ -649,6 +697,42 @@ def analyze_job(job: dict[str, Any]) -> JobIntelligence:
     )
 
 
+"""Tokens que indicam apenas hierarquia, nunca a função exercida."""
+LEVEL_TOKENS = frozenset(
+    token
+    for languages in LEVELS.values()
+    for variants in languages.values()
+    for term in variants
+    for token in normalize(term).split()
+)
+
+
+def core_tokens(value: Any) -> list[str]:
+    """Tokens de FUNÇÃO, sem os termos de senioridade.
+
+    "Payroll Analyst" e "Marketing Analyst" compartilham "analyst" e chegavam a
+    50% de semelhança de título — o suficiente para uma exceção baseada em
+    similaridade absolver um perfil de outra carreira. Comparar apenas o núcleo
+    funcional elimina esse falso positivo.
+    """
+    return [token for token in tokens(value) if token not in LEVEL_TOKENS]
+
+
+def _cosine(left_counts: Counter[str], right_counts: Counter[str]) -> float:
+    if not left_counts or not right_counts:
+        return 0.0
+    intersection = set(left_counts) & set(right_counts)
+    numerator = sum(left_counts[token] * right_counts[token] for token in intersection)
+    denominator = math.sqrt(sum(value * value for value in left_counts.values())) * math.sqrt(
+        sum(value * value for value in right_counts.values())
+    )
+    return numerator / denominator if denominator else 0.0
+
+
+def core_similarity(left: str, right: str) -> float:
+    return _cosine(Counter(core_tokens(left)), Counter(core_tokens(right)))
+
+
 def cosine_similarity(left: str, right: str) -> float:
     left_counts = Counter(tokens(left))
     right_counts = Counter(tokens(right))
@@ -731,10 +815,58 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     candidate_family = detect_family(title, candidate_text)
     candidate_level = detect_level(title)
 
+    best_title_similarity = max(
+        (cosine_similarity(variant, title) for variant in intelligence.equivalent_titles),
+        default=0.0,
+    )
+    # Semelhança do NÚCLEO funcional do título, sem termos de hierarquia. É esta
+    # medida — e não a semelhança bruta — que decide as exceções de elegibilidade.
+    best_core_similarity = max(
+        (core_similarity(variant, title) for variant in intelligence.equivalent_titles),
+        default=0.0,
+    )
+    evidence_tokens = len(tokens(candidate_text))
+
     # Elegibilidade vem antes da pontuação. Um algoritmo de seleção não pode
     # transformar localização ou palavras corporativas genéricas em aderência
     # quando cargo/família e senioridade são incompatíveis.
-    family_eligible = not intelligence.family or candidate_family == intelligence.family
+    #
+    # CORREÇÃO DA DUPLA ELIMINAÇÃO. A camada TypeScript já reprovou quem não tem
+    # cargo, senioridade, critérios obrigatórios e geografia compatíveis. O
+    # motor Python reprovava de novo, com uma taxonomia diferente e uma regra
+    # rígida demais: `candidate_family == intelligence.family`. Como o trecho
+    # público do Google tem cerca de 160 caracteres, `detect_family` devolve
+    # None para a maior parte dos perfis — e ausência de evidência virava
+    # reprovação. Duas listas de aprovados diferentes eliminando uma à outra é
+    # a causa direta das buscas que terminavam em zero perfil.
+    #
+    # Agora: família desconhecida NÃO elimina (reduz a nota e a confiança);
+    # família divergente elimina apenas quando o título também não sustenta a
+    # candidatura.
+    family_conflict = bool(
+        intelligence.family
+        and candidate_family
+        and candidate_family != intelligence.family
+    )
+    # Família divergente só é absolvida com DUAS evidências simultâneas: núcleo
+    # de título em comum e ao menos um sinal técnico da família da vaga no
+    # trecho público. Uma só delas não basta — "Payroll Manager" compartilha o
+    # núcleo "payroll" com um título de Total Rewards, e um gerente de RH
+    # compartilha "recursos humanos" com um Business Partner. A exigência dupla
+    # cobre o erro de classificação sem reabrir a porta para a carreira errada.
+    family_signals = ROLE_FAMILIES[intelligence.family].get("signals", ()) if intelligence.family else ()
+    family_signal_evidence = any(phrase_in(candidate_text, signal) for signal in family_signals)
+    family_eligible = not (
+        family_conflict and not (best_core_similarity >= 0.5 and family_signal_evidence)
+    )
+    family_unconfirmed = bool(intelligence.family and not candidate_family)
+    if family_unconfirmed and best_core_similarity < 0.2:
+        # Sem família e sem núcleo de título em comum não há evidência alguma de
+        # aderência: seguir adiante seria completar a lista com desconhecidos.
+        family_eligible = False
+        family_unconfirmed = False
+        family_conflict = True
+
     seniority_distance: int | None = None
     seniority_eligible = True
     if intelligence.level:
@@ -742,13 +874,12 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             seniority_distance = abs(LEVEL_ORDER.index(intelligence.level) - LEVEL_ORDER.index(candidate_level))
             seniority_eligible = seniority_distance <= 1
         elif LEVEL_ORDER.index(intelligence.level) >= LEVEL_ORDER.index("manager"):
-            seniority_eligible = False
+            # Numa posição de gerência ou acima, a senioridade precisa estar
+            # visível. Mas um trecho público curto é falha do índice do Google,
+            # não evidência de senioridade menor: nesse caso o perfil segue como
+            # "a confirmar" em vez de ser descartado.
+            seniority_eligible = evidence_tokens < 12
     eligible = family_eligible and seniority_eligible
-
-    best_title_similarity = max(
-        (cosine_similarity(variant, title) for variant in intelligence.equivalent_titles),
-        default=0.0,
-    )
     if intelligence.family and candidate_family == intelligence.family:
         # Estar na mesma família profissional é um bom sinal, mas não prova
         # aderência ao cargo: um Analista e um Diretor pertencem à mesma
@@ -758,6 +889,16 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             f"cargo equivalente em {intelligence.family_label}"
             if best_title_similarity >= 0.45
             else f"mesma família ({intelligence.family_label}), título divergente"
+        )
+    elif family_unconfirmed:
+        # Família não confirmada no trecho público. O título continua sendo a
+        # evidência disponível e recebe crédito parcial — em vez de a ausência
+        # de informação ser tratada como prova de incompatibilidade.
+        role_score = min(38.0, 14.0 + best_title_similarity * 30.0)
+        title_alignment = (
+            f"título compatível; família ({intelligence.family_label}) a confirmar no perfil"
+            if best_title_similarity >= 0.4
+            else "família e título não confirmados no trecho público"
         )
     else:
         role_score = min(34.0, best_title_similarity * 42.0)
@@ -821,10 +962,14 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     ranked.update({
         "eligible": eligible,
         "eligibilityReason": (
+            f"família profissional divergente ({ROLE_FAMILIES[candidate_family]['label']}) sem sustentação no título"
+            if not family_eligible and candidate_family else
             "família profissional incompatível"
             if not family_eligible else
-            "senioridade incompatível ou não comprovada no trecho público"
+            "senioridade incompatível com a vaga"
             if not seniority_eligible else
+            "família a confirmar no perfil; título e senioridade compatíveis"
+            if family_unconfirmed else
             "família profissional e senioridade compatíveis"
         ),
         "tier": tier,
@@ -852,25 +997,50 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     return ranked
 
 
-def rank_candidates(job: dict[str, Any], candidates: Iterable[dict[str, Any]]) -> tuple[JobIntelligence, list[dict[str, Any]]]:
+TIER_RANK = {"A": 0, "B": 1, "C": 2}
+
+
+def _ranking_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        TIER_RANK.get(str(item.get("tier") or "A"), 3),
+        -int(item.get("compatibility") or 0),
+        -int(item.get("evidenceConfidence") or 0),
+        normalize(item.get("name")),
+    )
+
+
+def rank_candidates(
+    job: dict[str, Any],
+    candidates: Iterable[dict[str, Any]],
+) -> tuple[JobIntelligence, list[dict[str, Any]], list[dict[str, Any]]]:
     intelligence = analyze_job(job)
     evaluated = [rank_candidate(job, intelligence, candidate) for candidate in candidates]
-    # Qualidade é prioridade: se nenhum perfil comprovar os requisitos mínimos,
-    # devolvemos uma lista vazia em vez de completar a quantidade solicitada com
-    # profissionais de outra carreira ou nível hierárquico.
-    ranked = [candidate for candidate in evaluated if candidate.get("eligible") is True]
-    tier_rank = {"A": 0, "B": 1, "C": 2}
-    ranked.sort(
-        key=lambda item: (
-            tier_rank.get(str(item.get("tier") or "A"), 3),
-            -int(item.get("compatibility") or 0),
-            -int(item.get("evidenceConfidence") or 0),
-            normalize(item.get("name")),
-        ),
+
+    # Qualidade continua sendo prioridade: a lista principal só recebe quem
+    # comprova os requisitos mínimos, e nunca é completada com profissionais de
+    # outra carreira ou nível hierárquico.
+    ranked = sorted(
+        (candidate for candidate in evaluated if candidate.get("eligible") is True),
+        key=_ranking_key,
     )
+
+    # Os reprovados deixam de desaparecer em silêncio. Voltam num conjunto de
+    # EXPANSÃO separado, com a nota limitada a 45 e o motivo da reprovação
+    # explícito, para que uma busca sem aprovados diga o que aconteceu em vez de
+    # apenas exibir zero perfil.
+    expansion = sorted(
+        (candidate for candidate in evaluated if candidate.get("eligible") is not True),
+        key=_ranking_key,
+    )
+    for candidate in expansion:
+        candidate["compatibility"] = min(int(candidate.get("compatibility") or 0), 45)
+        candidate["fitClassification"] = "expansion"
+
     for position, candidate in enumerate(ranked, start=1):
         candidate["rank"] = position
-    return intelligence, ranked
+    for position, candidate in enumerate(expansion, start=1):
+        candidate["rank"] = position
+    return intelligence, ranked, expansion
 
 
 def intelligence_payload(intelligence: JobIntelligence) -> dict[str, Any]:
