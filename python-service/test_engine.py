@@ -25,6 +25,22 @@ class TalentEngineTests(unittest.TestCase):
         self.assertIn("analista de nómina", normalized)
         self.assertIn("analista de departamento pessoal", normalized)
 
+    def test_uses_declared_technical_requirements_when_keyword_chips_are_empty(self):
+        job = {
+            **self.job,
+            "title": "Analista de Sistemas",
+            "keywords": [],
+            "description": (
+                "Requisitos: experiência com TOTVS Protheus, SAP SuccessFactors "
+                "Employee Central e integrações por APIs REST, XML e JSON."
+            ),
+        }
+        intelligence = analyze_job(job)
+        labels = [concept.label for concept in intelligence.required_keywords]
+        self.assertIn("totvs protheus", labels)
+        self.assertIn("successfactors employee central", labels)
+        self.assertIn("apis rest", labels)
+
     def test_multilingual_equivalent_outranks_unrelated_profile(self):
         candidates = [
             {
