@@ -3,7 +3,7 @@ import unittest
 
 from openpyxl import load_workbook
 
-from engine import analyze_job, rank_candidates
+from engine import analyze_job, core_similarity, rank_candidates
 from spreadsheet import create_candidate_workbook
 
 
@@ -36,7 +36,7 @@ class TalentEngineTests(unittest.TestCase):
                 "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/bruno",
             },
         ]
-        _, ranked = rank_candidates(self.job, candidates)
+        _, ranked, _expansion = rank_candidates(self.job, candidates)
         # Perfis de outra família profissional não são exibidos para completar
         # artificialmente a quantidade solicitada.
         self.assertEqual("Ana", ranked[0]["name"])
@@ -65,12 +65,30 @@ class TalentEngineTests(unittest.TestCase):
             {"name": "Hellen", "title": "Fraud Analyst", "summary": "Fast-paced environments"},
             {"name": "Claudia", "title": "Executive Assistant and Office Manager", "summary": "Office management"},
         ]
-        intelligence, ranked = rank_candidates(job, candidates)
+        intelligence, ranked, _expansion = rank_candidates(job, candidates)
         self.assertEqual("human_resources", intelligence.family)
         self.assertEqual(["Diretora RH"], [candidate["name"] for candidate in ranked])
         self.assertIn("HR Business Partner estratégico", intelligence.skills)
         self.assertIn("Relações trabalhistas e sindicais", intelligence.skills)
         self.assertIn("RH em operação industrial", intelligence.skills)
+
+    def test_business_partner_search_does_not_return_generic_hr_managers(self):
+        job = {
+            **self.job,
+            "title": "Business Partner de RH",
+            "description": "Atuação como parceiro estratégico do negócio, apoio às lideranças, pessoas e cultura.",
+            "keywords": [],
+        }
+        candidates = [
+            {"name": "BP", "title": "HR Business Partner", "summary": "Strategic partner for business leaders and people agenda"},
+            {"name": "People BP", "title": "Business Partner de Pessoas e Cultura", "summary": "Parceria com o negócio e desenvolvimento de lideranças"},
+            {"name": "Gerente RH", "title": "Gerente de Recursos Humanos", "summary": "Recrutamento, treinamento, clima e relações trabalhistas"},
+            {"name": "Gestor Geral", "title": "Gerente Administrativo", "summary": "Gestão de equipe e orçamento"},
+        ]
+        intelligence, ranked, _expansion = rank_candidates(job, candidates)
+        self.assertEqual("business_partner", intelligence.family)
+        self.assertEqual({"BP", "People BP"}, {candidate["name"] for candidate in ranked})
+        self.assertNotIn("Gerente RH", [candidate["name"] for candidate in ranked])
 
     def test_total_rewards_head_rejects_hr_generalists_and_junior_candidates(self):
         job = {
@@ -94,7 +112,7 @@ class TalentEngineTests(unittest.TestCase):
             {"name": "Analista RH", "title": "Analista de Recursos Humanos", "company": "Unilever",
              "summary": "Rotinas de recursos humanos"},
         ]
-        intelligence, ranked = rank_candidates(job, candidates)
+        intelligence, ranked, _expansion = rank_candidates(job, candidates)
         self.assertEqual("compensation_benefits", intelligence.family)
         self.assertEqual({"Head Total Rewards", "Gerente C&B"}, {candidate["name"] for candidate in ranked})
         self.assertNotIn("Gerente RH", [candidate["name"] for candidate in ranked])
@@ -147,7 +165,7 @@ class TalentEngineTests(unittest.TestCase):
                 "summary": "Liderança de engenharia de software e arquitetura de sistemas",
             },
         ]
-        _, ranked = rank_candidates(job, candidates)
+        _, ranked, _expansion = rank_candidates(job, candidates)
         self.assertEqual(["Perfil como Daniel"], [candidate["name"] for candidate in ranked])
 
     def test_process_standardization_expands_titles_in_three_languages(self):
@@ -200,7 +218,7 @@ class TalentEngineTests(unittest.TestCase):
                 "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/eduardo",
             },
         ]
-        _, ranked = rank_candidates(job, candidates)
+        _, ranked, _expansion = rank_candidates(job, candidates)
         # Quem evidencia todos os critérios obrigatórios ocupa as primeiras
         # posições; perfis de outra família profissional não são exibidos.
         top = [candidate["name"] for candidate in ranked[:3]]
@@ -230,7 +248,7 @@ class TalentEngineTests(unittest.TestCase):
                 "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/bruno",
             },
         ]
-        _, ranked = rank_candidates(job, candidates)
+        _, ranked, _expansion = rank_candidates(job, candidates)
         self.assertEqual("Ana", ranked[0]["name"])
         self.assertEqual(10, ranked[0]["scoreBreakdown"]["segmento"])
         self.assertEqual(2, ranked[1]["scoreBreakdown"]["segmento"])
@@ -257,7 +275,7 @@ class TalentEngineTests(unittest.TestCase):
                 "profileUrl": "https://www.linkedin.com/in/analista",
             },
         ]
-        _, ranked = rank_candidates(job, candidates)
+        _, ranked, _expansion = rank_candidates(job, candidates)
         self.assertEqual("Gerente", ranked[0]["name"])
         self.assertEqual(["Gerente"], [candidate["name"] for candidate in ranked])
         self.assertIn("senioridade compatível", ranked[0]["matchReason"])
@@ -269,7 +287,7 @@ class TalentEngineTests(unittest.TestCase):
             "description": "Gestão e padronização de processos industriais em couro e curtume.",
             "keywords": ["Couro e Curtume"],
         }
-        _, ranked = rank_candidates(job, [{
+        _, ranked, _expansion = rank_candidates(job, [{
             "id": "1", "name": "Aderente", "title": "Gerente de Processos Industriais",
             "company": "Curtume Alfa", "summary": "Padronização de processos de couro em curtume",
             "city": "São Paulo", "state": "SP", "country": "Brasil",
@@ -339,7 +357,7 @@ class TalentEngineTests(unittest.TestCase):
                 "profileUrl": "https://www.linkedin.com/in/laura",
             },
         ]
-        _, ranked = rank_candidates(job, candidates)
+        _, ranked, _expansion = rank_candidates(job, candidates)
         self.assertEqual("María", ranked[0]["name"])
         self.assertIn("cidade selecionada confirmada", ranked[0]["matchReason"])
 
@@ -365,12 +383,12 @@ class TalentEngineTests(unittest.TestCase):
                 "profileUrl": "https://www.linkedin.com/in/outro",
             },
         ]
-        _, ranked = rank_candidates(job, candidates)
+        _, ranked, _expansion = rank_candidates(job, candidates)
         self.assertEqual("México", ranked[0]["name"])
         self.assertGreater(ranked[0]["compatibility"], ranked[1]["compatibility"])
 
     def test_export_creates_real_xlsx_with_hyperlink(self):
-        _, ranked = rank_candidates(self.job, [{
+        _, ranked, _expansion = rank_candidates(self.job, [{
             "id": "1", "name": "Ana", "title": "Payroll Analyst", "summary": "Payroll and Excel",
             "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/ana",
         }])
@@ -382,13 +400,102 @@ class TalentEngineTests(unittest.TestCase):
         self.assertEqual("https://www.linkedin.com/in/ana", sheet["L2"].hyperlink.target)
 
     def test_export_neutralizes_excel_formulas(self):
-        _, ranked = rank_candidates(self.job, [{
+        _, ranked, _expansion = rank_candidates(self.job, [{
             "id": "1", "name": "=HYPERLINK(\"bad\")", "title": "Payroll Analyst", "summary": "Payroll and Excel",
             "city": "São Paulo", "state": "SP", "profileUrl": "https://www.linkedin.com/in/safe",
         }])
         binary = create_candidate_workbook(self.job, ranked)
         workbook = load_workbook(BytesIO(binary), data_only=False)
         self.assertTrue(str(workbook["Candidatos"]["D2"].value).startswith("'="))
+
+
+class EngineRegressionTests(unittest.TestCase):
+    """Regressões da revisão de setembro/2026."""
+
+    job = {
+        "title": "Coordenador de Logística",
+        "city": "Barretos",
+        "cities": ["Barretos"],
+        "country": "Brasil",
+        "description": "Coordenação de logística, transportes, estoque e roteirização.",
+        "keywords": [],
+    }
+
+    def test_unknown_family_is_not_treated_as_incompatibility(self):
+        """O snippet de 160 caracteres raramente revela a família profissional.
+
+        Antes da correção, ausência de evidência virava reprovação e a busca
+        terminava em zero perfil mesmo com bons candidatos no conjunto.
+        """
+        _, ranked, _ = rank_candidates(self.job, [{
+            "name": "Marina Toledo",
+            "title": "Coordenadora de Logística",
+            "summary": "Barretos, São Paulo",
+        }])
+        self.assertEqual(["Marina Toledo"], [candidate["name"] for candidate in ranked])
+
+    def test_rejected_profiles_return_as_auditable_expansion(self):
+        _, ranked, expansion = rank_candidates(self.job, [{
+            "name": "Fora de escopo",
+            "title": "Cirurgião Dentista",
+            "summary": "Clínica odontológica",
+        }])
+        self.assertEqual([], ranked)
+        self.assertEqual(["Fora de escopo"], [candidate["name"] for candidate in expansion])
+        self.assertLessEqual(expansion[0]["compatibility"], 45)
+        self.assertTrue(expansion[0]["eligibilityReason"])
+
+    def test_core_similarity_ignores_hierarchy_terms(self):
+        # "Analyst" não pode aproximar carreiras diferentes.
+        self.assertEqual(0.0, core_similarity("Payroll Analyst", "Marketing Analyst"))
+        self.assertGreater(core_similarity("Payroll Analyst", "Payroll Manager"), 0.9)
+
+    def test_gender_key_never_changes_the_score(self):
+        """A chave de gênero recorta o sourcing; jamais pontua o candidato."""
+        base = {
+            "name": "Marina Toledo",
+            "title": "Coordenadora de Logística",
+            "summary": "Barretos, São Paulo",
+        }
+        _, without_key, _ = rank_candidates(self.job, [dict(base)])
+        _, with_key, _ = rank_candidates(
+            {**self.job, "genderKey": "feminino"},
+            [{**base, "gender": {"value": "feminino", "confidence": 92, "source": "nome", "basis": "prenome"}}],
+        )
+        self.assertEqual(without_key[0]["compatibility"], with_key[0]["compatibility"])
+        # E a inferência recebida da camada de busca é preservada para auditoria.
+        self.assertEqual("feminino", with_key[0]["gender"]["value"])
+
+    def test_spreadsheet_records_the_gender_key_audit(self):
+        _, ranked, _ = rank_candidates(
+            {**self.job, "genderKey": "feminino"},
+            [{
+                "name": "Marina Toledo",
+                "title": "Coordenadora de Logística",
+                "summary": "Barretos",
+                "profileUrl": "https://www.linkedin.com/in/marina",
+                "gender": {"value": "feminino", "confidence": 92, "source": "nome", "basis": "prenome feminino reconhecido: Marina"},
+            }],
+        )
+        binary = create_candidate_workbook({**self.job, "genderKey": "feminino"}, ranked)
+        workbook = load_workbook(BytesIO(binary))
+        sheet = workbook["Candidatos"]
+        self.assertEqual("Gênero (inferido)", sheet["O1"].value)
+        self.assertIn("feminino", str(sheet["O2"].value))
+        details = workbook["Detalhes da busca"]
+        audit = " ".join(str(row[1].value or "") for row in details.iter_rows(min_row=1))
+        self.assertIn("feminino", audit)
+
+    def test_spreadsheet_stays_clean_when_the_gender_key_is_off(self):
+        _, ranked, _ = rank_candidates(self.job, [{
+            "name": "Marina Toledo", "title": "Coordenadora de Logística",
+            "summary": "Barretos", "profileUrl": "https://www.linkedin.com/in/marina",
+        }])
+        workbook = load_workbook(BytesIO(create_candidate_workbook(self.job, ranked)))
+        self.assertEqual("", workbook["Candidatos"]["O2"].value or "")
+        details = workbook["Detalhes da busca"]
+        audit = " ".join(str(row[1].value or "") for row in details.iter_rows(min_row=1))
+        self.assertIn("Desligada", audit)
 
 
 if __name__ == "__main__":

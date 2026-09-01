@@ -80,3 +80,57 @@ test("ausência de evidência não é apresentada como confirmação", () => {
   assert.equal(result.evidence.find((item) => item.criterion === "geography")?.status, "unconfirmed");
   assert.equal(result.evidence.find((item) => item.criterion === "required")?.status, "unconfirmed");
 });
+
+test("aceita título equivalente multilíngue antes do ranking Python", () => {
+  const result = assessCandidateEvidence({
+    jobTitle: "Gerente de Produção",
+    roleAlternatives: ["Production Manager", "Manufacturing Manager"],
+    candidateTitle: "Production Manager",
+    candidateText: "Leadership of food manufacturing operations.",
+    requiredConcepts: [],
+    geographicMatch: "city",
+    geographicLabel: "cidade atual confirmada: Barretos",
+  });
+
+  assert.equal(result.eligible, true);
+  // "produção" é reconhecida em "Production" pelo vocabulário funcional, sem
+  // depender de o título alternativo coincidir palavra por palavra.
+  assert.equal(result.evidence.find((item) => item.criterion === "role")?.status, "confirmed");
+  assert.ok(result.evidence.find((item) => item.criterion === "role")?.evidence.includes("producao"));
+});
+
+test("usa o título alternativo quando o vocabulário funcional não cobre o termo", () => {
+  const result = assessCandidateEvidence({
+    jobTitle: "Gerente de Padronização de Processos",
+    roleAlternatives: ["Process Standardization Manager"],
+    candidateTitle: "Process Standardization Manager",
+    candidateText: "Governance and standardization of industrial processes.",
+    requiredConcepts: [],
+    geographicMatch: "city",
+    geographicLabel: "cidade atual confirmada: Barretos",
+  });
+
+  assert.equal(result.eligible, true);
+  assert.ok(result.evidence.find((item) => item.criterion === "role")?.evidence
+    .includes("título equivalente: Process Standardization Manager"));
+});
+
+test("cargo citado só no trecho público vale menos que no título", () => {
+  // Quando o Google não devolve separador, o parser entrega um título genérico.
+  // Antes da correção a aderência funcional caía a zero e o perfil correto era
+  // eliminado por falha de formatação do snippet, não por incompatibilidade.
+  const result = assessCandidateEvidence({
+    jobTitle: "Gerente de Produção",
+    roleAlternatives: ["Production Manager"],
+    candidateTitle: "Perfil profissional no LinkedIn",
+    candidateText: "Production Manager na Indústria Alfa, liderando três turnos e 180 pessoas.",
+    requiredConcepts: [],
+    geographicMatch: "city",
+    geographicLabel: "cidade atual confirmada: Barretos",
+  });
+
+  assert.equal(result.eligible, true);
+  const role = result.evidence.find((item) => item.criterion === "role");
+  assert.equal(role?.status, "unconfirmed");
+  assert.ok((role?.score || 0) > 0 && (role?.score || 0) < 25);
+});

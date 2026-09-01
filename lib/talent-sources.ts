@@ -1,8 +1,16 @@
 import { getSecret, saveSecret } from "@/lib/secure-settings";
 import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
 import { getMarketSegment } from "@/lib/market-segments";
-import { extractExplicitCurrentLocation, isExcludedCandidateName } from "@/lib/search-guardrails";
+import { boundedSearchQuery, extractExplicitCurrentLocation, isExcludedCandidateName } from "@/lib/search-guardrails";
 import { assessCandidateEvidence, type CandidateEvidence } from "@/lib/evidence-scoring";
+import {
+  genderPronounExpression,
+  genderedTitle,
+  inferGender,
+  matchesGenderKey,
+  type GenderInference,
+  type GenderKey,
+} from "@/lib/gender-inference";
 
 export type TalentProvider = "serper";
 
@@ -23,6 +31,10 @@ export type TalentSearchInput = {
   maxCandidates: number;
   /** Quando verdadeiro, elimina quem não evidencia TODOS os conceitos obrigatórios. */
   strictRequiredKeywords?: boolean;
+  /** Chave de gênero: vazio desliga a inferência por completo. */
+  genderKey?: GenderKey;
+  /** Mantém na lista os perfis cujo gênero não pôde ser identificado. */
+  includeUnknownGender?: boolean;
 };
 
 export type CandidateTier = "A" | "B" | "C";
@@ -53,6 +65,8 @@ export type TalentCandidate = {
   fitClassification?: "high" | "validate" | "expansion" | "rejected";
   rejectionReasons?: string[];
   evidence?: CandidateEvidence[];
+  /** Presente apenas quando a chave de gênero está ativa na busca. */
+  gender?: GenderInference;
   scoreBreakdown?: {
     cargo: number;
     senioridade: number;
@@ -75,6 +89,14 @@ export type ProviderSearchStatus = {
   elapsedMs?: number;
   tiers?: { A: number; B: number; C: number };
   mappedCompanies?: string[];
+  /** Perfis aderentes que a chave de gênero retirou da lista, por motivo. */
+  genderAudit?: {
+    key: GenderKey;
+    matched: number;
+    opposite: number;
+    unidentified: number;
+    includeUnknown: boolean;
+  };
 };
 
 const PROVIDER = {
@@ -92,6 +114,8 @@ const RESULTS_PER_QUERY = 10;
 const PARALLEL_BATCH = 3;
 const SERPER_TIMEOUT_MS = Math.max(6000, Number(process.env.EUREKA_SERPER_TIMEOUT_MS) || 12000);
 const CACHE_TTL_MS = 10 * 60 * 1000;
+
+const SERPER_RETRY_DELAYS_MS = [700, 1800];
 
 const BRAZIL_STATES: Record<string, string> = {
   acre: "AC",
@@ -484,26 +508,47 @@ function noiseAssessment(candidateText: string) {
  * "Gerente de Processos de RH" pontuar alto numa vaga de
  * "Gerente de Padronização de Processos" industrial.
  */
+function roleCoreTokens(title: string) {
+  return unique(
+    meaningfulTokens(title).filter((token) =>
+      !SENIORITY_LEVELS.some((level) => level.terms.some((term) => withoutAccents(term) === token)),
+    ),
+  );
+}
+
 function roleScore(candidateTitleText: string, input: TalentSearchInput) {
   const titles = unique([input.title, ...(input.titleVariants || [])].map(naturalSearchTerm).filter(Boolean));
   const normalizedCandidate = withoutAccents(candidateTitleText);
   const exactHit = titles.find((title) => normalizedCandidate.includes(withoutAccents(title)));
   if (exactHit) return { score: 40, label: `cargo exato: ${exactHit}` };
 
-  const coreTokens = unique(
-    meaningfulTokens(input.title).filter((token) =>
-      !SENIORITY_LEVELS.some((level) => level.terms.some((term) => withoutAccents(term) === token)),
-    ),
-  );
-  if (!coreTokens.length) return { score: 12, label: "cargo genérico" };
-  const matched = coreTokens.filter((token) => normalizedCandidate.includes(token));
-  const coverage = matched.length / coreTokens.length;
-  // Cobertura parcial é deliberadamente punida: 2 de 3 palavras não é
+  // CORREÇÃO CENTRAL DE ASSERTIVIDADE. A versão anterior media a cobertura de
+  // termos apenas contra o título digitado pelo recrutador. O motor Python já
+  // devolve os cargos equivalentes em português, inglês e espanhol, mas eles
+  // eram usados somente na comparação de expressão exata — e uma expressão
+  // exata quase nunca aparece no trecho de 160 caracteres do Google. Resultado:
+  // "Talent Acquisition Manager" pontuava 0 numa vaga de "Gerente de
+  // Recrutamento e Seleção" e era descartado antes de qualquer avaliação.
+  // Agora a cobertura é calculada contra todos os títulos equivalentes e vence
+  // o melhor deles.
+  let best = { coverage: 0, matched: 0, total: 0, title: input.title };
+  for (const title of titles.slice(0, 14)) {
+    const coreTokens = roleCoreTokens(title);
+    if (!coreTokens.length) continue;
+    const matched = coreTokens.filter((token) => normalizedCandidate.includes(token));
+    const coverage = matched.length / coreTokens.length;
+    if (coverage > best.coverage) {
+      best = { coverage, matched: matched.length, total: coreTokens.length, title };
+    }
+  }
+  if (!best.total) return { score: 12, label: "cargo genérico" };
+  // Cobertura parcial continua deliberadamente punida: 2 de 3 palavras não é
   // "quase o cargo certo", costuma ser outro cargo.
-  const score = Math.round(coverage * coverage * 32);
-  const label = coverage >= 0.99
-    ? "todos os termos do cargo"
-    : `${matched.length}/${coreTokens.length} termo(s) do cargo`;
+  const score = Math.round(best.coverage * best.coverage * 32);
+  const equivalentNote = best.title !== input.title ? ` (equivalente: ${best.title})` : "";
+  const label = best.coverage >= 0.99
+    ? `todos os termos do cargo${equivalentNote}`
+    : `${best.matched}/${best.total} termo(s) do cargo${equivalentNote}`;
   return { score, label };
 }
 
@@ -552,6 +597,7 @@ function calculateCompatibility(
   );
   const evidenceAssessment = assessCandidateEvidence({
     jobTitle: input.title,
+    roleAlternatives: input.titleVariants,
     candidateTitle: candidate.title,
     candidateText,
     requiredConcepts: requiredEvidence.concepts,
@@ -644,11 +690,14 @@ function parseProfessionalTitle(value: unknown) {
   };
 }
 
+type GenderAudit = { matched: number; opposite: number; unidentified: number };
+
 function serperCandidate(
   result: Record<string, unknown>,
   index: number,
   input: TalentSearchInput,
   searchedLocations: string[] = [],
+  genderAudit?: GenderAudit,
 ): TalentCandidate | null {
   const profileUrl = linkedinProfileUrl(result.link);
   if (!profileUrl) return null;
@@ -682,6 +731,30 @@ function serperCandidate(
   // eliminação só ocorre quando o modo estrito é pedido explicitamente.
   if (input.strictRequiredKeywords && score.tier !== "A") return null;
 
+  // CHAVE DE GÊNERO. Aplicada por último, de propósito: só chega aqui quem já
+  // foi aprovado por cargo, senioridade, critérios obrigatórios e geografia.
+  // Assim a chave nunca compensa aderência profissional — ela apenas recorta o
+  // conjunto já aprovado — e a auditoria registra exatamente quantos perfis
+  // aderentes foram separados e por qual motivo.
+  let gender: GenderInference | undefined;
+  if (input.genderKey) {
+    gender = inferGender({
+      name: professional.name,
+      title: professional.title,
+      text: publicText,
+    });
+    if (!matchesGenderKey(gender, input.genderKey)) {
+      const unidentified = gender.value === "indeterminado";
+      if (genderAudit) {
+        if (unidentified) genderAudit.unidentified += 1;
+        else genderAudit.opposite += 1;
+      }
+      if (!(unidentified && input.includeUnknownGender)) return null;
+    } else if (genderAudit) {
+      genderAudit.matched += 1;
+    }
+  }
+
   return {
     id: `serper:${plain(result.position) || index}:${profileUrl}`,
     name: professional.name,
@@ -689,6 +762,7 @@ function serperCandidate(
     profileUrl,
     source: "Google via Serper",
     ...score,
+    ...(gender ? { gender } : {}),
   };
 }
 
@@ -708,7 +782,7 @@ type SerperSearch = {
   query: string;
   page: number;
   targetCities: string[];
-  layer: "ancora" | "variante" | "dominio" | "profundidade" | "adaptativa";
+  layer: "ancora" | "variante" | "dominio" | "profundidade" | "adaptativa" | "genero";
 };
 
 function simplifiedTitle(value: string) {
@@ -782,8 +856,12 @@ function buildSearchPlan(input: TalentSearchInput) {
     const aliases = concept.aliases.slice(0, 10).map(exactPhrase).filter(Boolean);
     return aliases.length > 1 ? `(${aliases.join(" OR ")})` : aliases[0] || "";
   }).filter(Boolean);
-  const conceptExpression = conceptGroups.join(" ");
-  const discoveryConcept = conceptGroups[0]
+  // Nunca juntamos todos os conceitos com AND numa única consulta: o índice do
+  // Google raramente exibe todas as competências no pequeno snippet do perfil.
+  // Cada conceito recebe uma consulta própria; a confirmação conjunta fica no
+  // ranking, onde há classificação A/B/C auditável.
+  const conceptExpressions = conceptGroups.length ? conceptGroups : [""];
+  const discoveryConcept = conceptExpressions[0]
     || exactPhrase((input.semanticKeywords || []).find((term) => !GENERIC_CORPORATE_TERMS.has(withoutAccents(term))) || "");
   const semanticConcepts = unique((input.semanticKeywords || [])
     .map(naturalSearchTerm)
@@ -791,30 +869,53 @@ function buildSearchPlan(input: TalentSearchInput) {
     .slice(0, 4)
     .map(exactPhrase)
     .filter(Boolean);
-  const semanticExpression = conceptExpression || semanticConcepts.slice(0, 3).join(" ");
+  const semanticExpression = conceptExpressions[0] || semanticConcepts.slice(0, 2).join(" ");
 
-  const titles = titleVariants(input.title, input.titleVariants);
+  const baseTitles = titleVariants(input.title, input.titleVariants);
+  // Com a chave de gênero ativa, a forma flexionada do cargo entra na frente da
+  // forma genérica. É isso que faz o Google devolver "Coordenadora de
+  // Suprimentos" — perfil que a consulta masculina genérica não alcança.
+  const titles = input.genderKey
+    ? unique(baseTitles.flatMap((title) => [genderedTitle(title, input.genderKey!), title]).filter(Boolean))
+    : baseTitles;
   const groups = input.countrywide ? [[]] : citySearchGroups(input.cities);
   const sharedCities = input.countrywide ? [] : input.cities.slice(0, 8);
   const searches: SerperSearch[] = [];
-  const companyExpression = (input.mappedCompanies || []).slice(0, 12).map(exactPhrase).filter(Boolean);
+  const companyExpression = (input.mappedCompanies || []).slice(0, 8).map(exactPhrase).filter(Boolean);
   const companies = companyExpression.length > 1 ? `(${companyExpression.join(" OR ")})` : companyExpression[0] || "";
 
-  const push = (query: string, page: number, targetCities: string[], layer: SerperSearch["layer"]) => {
-    const normalized = `site:linkedin.com/in ${query}`.replace(/\s+/g, " ").trim();
-    searches.push({ query: normalized, page, targetCities, layer });
+  // Os blocos são entregues em ordem de prioridade: sem cargo a consulta não
+  // faz sentido, sem geografia ela devolve o mundo inteiro, e a lista de
+  // empresas é o primeiro item a ser sacrificado quando o orçamento aperta.
+  const push = (blocks: string[], page: number, targetCities: string[], layer: SerperSearch["layer"]) => {
+    const query = boundedSearchQuery(["site:linkedin.com/in", ...blocks]);
+    if (query) searches.push({ query, page, targetCities, layer });
   };
 
-  // Camada 1 — âncora: título exato entre aspas + conceitos + geografia.
+  // Camada 1 — âncora: título exato + UM conceito prioritário + geografia.
   const primaryTitle = exactPhrase(titles[0] || input.title);
-  for (const targetCities of groups.slice(0, 3)) {
-    push(`${primaryTitle} ${semanticExpression} ${companies} ${geographicQuery(input, targetCities)}`, 1, targetCities, "ancora");
+  for (const [index, targetCities] of groups.slice(0, 3).entries()) {
+    const concept = conceptExpressions[index % conceptExpressions.length] || semanticExpression;
+    push([primaryTitle, concept, geographicQuery(input, targetCities), companies], 1, targetCities, "ancora");
   }
 
   // Camada 2 — variantes de cargo com apenas o conceito mais distintivo. Exigir
   // todos os critérios no snippet do Google diminuía demais a cobertura.
-  for (const variant of titles.slice(1, 6)) {
-    push(`${exactPhrase(variant)} ${discoveryConcept} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "variante");
+  for (const [index, variant] of titles.slice(1, 6).entries()) {
+    const concept = conceptExpressions[index % conceptExpressions.length] || discoveryConcept;
+    push([exactPhrase(variant), concept, geographicQuery(input, sharedCities), companies], 1, sharedCities, "variante");
+  }
+
+  // Camada de gênero — existe somente quando a chave está ativa. O pronome
+  // declarado no próprio perfil é o sinal público mais confiável e não é
+  // alcançado por nenhuma das outras camadas.
+  if (input.genderKey) {
+    const pronouns = genderPronounExpression(input.genderKey);
+    const flexedTitle = genderedTitle(input.title, input.genderKey);
+    if (flexedTitle) {
+      push([exactPhrase(flexedTitle), discoveryConcept, geographicQuery(input, sharedCities)], 1, sharedCities, "genero");
+    }
+    push([primaryTitle, pronouns, geographicQuery(input, sharedCities)], 1, sharedCities, "genero");
   }
 
   // Camada 3 — domínio: quem tem a expertise mas usa outro nome de cargo.
@@ -823,14 +924,14 @@ function buildSearchPlan(input: TalentSearchInput) {
     const levelExpression = jobLevel
       ? `(${jobLevel.terms.slice(0, 4).map(exactPhrase).filter(Boolean).join(" OR ")})`
       : "";
-    push(`${discoveryConcept || semanticExpression} ${levelExpression} ${companies} ${geographicQuery(input, sharedCities)}`, 1, sharedCities, "dominio");
+    push([discoveryConcept || semanticExpression, levelExpression, geographicQuery(input, sharedCities), companies], 1, sharedCities, "dominio");
   }
 
   // Camada 4 — profundidade progressiva. A página 2 mantém o conceito mais
   // distintivo; a página 3 relaxa os critérios somente para ampliar o pool. O
   // ranking A/B/C continua impedindo que o perfil relaxado passe à frente.
-  push(`${primaryTitle} ${discoveryConcept} ${geographicQuery(input, sharedCities)}`, 2, sharedCities, "profundidade");
-  push(`${primaryTitle} ${geographicQuery(input, sharedCities)}`, 3, sharedCities, "profundidade");
+  push([primaryTitle, discoveryConcept, geographicQuery(input, sharedCities)], 2, sharedCities, "profundidade");
+  push([primaryTitle, geographicQuery(input, sharedCities)], 3, sharedCities, "profundidade");
 
   const seen = new Set<string>();
   return searches.filter((item) => {
@@ -838,7 +939,10 @@ function buildSearchPlan(input: TalentSearchInput) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, Math.max(4, SEARCH_BUDGET - 4));
+    // Com o mapeamento de empresas deixando de gastar 2 créditos por busca, o
+    // plano inicial pode ocupar mais consultas e ainda sobra folga para a
+    // rodada adaptativa orientada pelos resultados.
+  }).slice(0, Math.max(4, SEARCH_BUDGET - 2));
 }
 
 /**
@@ -874,18 +978,36 @@ function buildAdaptiveSearchPlan(
 
   for (const [index, title] of titles.entries()) {
     const targetCities = cityGroups[index % cityGroups.length] || [];
-    const query = `site:linkedin.com/in ${exactPhrase(title)} ${conceptExpression} ${geographicQuery(input, targetCities)}`
-      .replace(/\s+/g, " ")
-      .trim();
+    // Com a chave ativa, o título aprendido também é flexionado antes de
+    // voltar ao Google — o aprendizado da rodada anterior não pode desfazer o
+    // recorte pedido pelo recrutador.
+    const learnedTitle = (input.genderKey && genderedTitle(title, input.genderKey)) || title;
+    const query = boundedSearchQuery([
+      "site:linkedin.com/in",
+      exactPhrase(learnedTitle),
+      conceptExpression,
+      geographicQuery(input, targetCities),
+    ]);
     const key = `${query.toLowerCase()}|1`;
-    if (!used.has(key)) searches.push({ query, page: 1, targetCities, layer: "adaptativa" });
+    if (query && !used.has(key)) searches.push({ query, page: 1, targetCities, layer: "adaptativa" });
   }
   return searches.slice(0, Math.max(0, SEARCH_BUDGET - usedSearches.length));
 }
 
 const responseCache = new Map<string, { at: number; payload: Record<string, unknown> | null }>();
 
-async function callSerper(apiKey: string, query: string, num = RESULTS_PER_QUERY, page = 1, countryCode = "BR") {
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callSerper(
+  apiKey: string,
+  query: string,
+  num = RESULTS_PER_QUERY,
+  page = 1,
+  countryCode = "BR",
+  attempt = 0,
+): Promise<Record<string, unknown> | null> {
   const profile = getCountryProfile(countryCode);
   const cacheKey = `${countryCode}|${page}|${num}|${query}`;
   const cached = responseCache.get(cacheKey);
@@ -906,6 +1028,14 @@ async function callSerper(apiKey: string, query: string, num = RESULTS_PER_QUERY
       signal: controller.signal,
     });
     const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    // Rajada de 3 consultas em paralelo tropeça no limite por segundo do
+    // Serper. Antes, a consulta era simplesmente perdida e o pool encolhia sem
+    // aviso; agora ela é repetida com espera crescente.
+    if ((response.status === 429 || response.status >= 500) && attempt < SERPER_RETRY_DELAYS_MS.length) {
+      clearTimeout(timeout);
+      await wait(SERPER_RETRY_DELAYS_MS[attempt]);
+      return callSerper(apiKey, query, num, page, countryCode, attempt + 1);
+    }
     if (!response.ok || plain(payload?.error)) throw new Error(providerError(response, payload));
     responseCache.set(cacheKey, { at: Date.now(), payload });
     if (responseCache.size > 200) responseCache.clear();
@@ -923,6 +1053,14 @@ async function callSerper(apiKey: string, query: string, num = RESULTS_PER_QUERY
 async function discoverSegmentCompanies(apiKey: string, input: TalentSearchInput) {
   const segment = getMarketSegment(input.marketSegment);
   if (!segment.value) return { companies: [] as string[], queries: 0 };
+  // ECONOMIA DE 2 CRÉDITOS POR BUSCA. As duas consultas de mapeamento gastavam
+  // orçamento do Serper para, no fim, devolver sempre a base curada do
+  // segmento: o resultado do Google apenas reordenava a mesma lista. Quando o
+  // segmento já tem empresas curadas, elas são usadas direto e as duas
+  // consultas passam a procurar profissionais — que é o objetivo da busca.
+  if (segment.seedCompanies?.length) {
+    return { companies: segment.seedCompanies.slice(0, 12), queries: 0 };
+  }
   const profile = getCountryProfile(input.countryCode);
   const queries = [
     `maiores empresas ${segment.searchTerms.slice(0, 2).join(" OR ")} ${profile.name}`,
@@ -975,13 +1113,14 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
   const enrichedInput = { ...input, mappedCompanies: companyDiscovery.companies };
   const plan = buildSearchPlan(enrichedInput);
   const maxCandidates = Math.min(20, Math.max(1, Math.trunc(input.maxCandidates || 20)));
+  const genderAudit: GenderAudit = { matched: 0, opposite: 0, unidentified: 0 };
 
   const parsePayload = (payload: Record<string, unknown> | null, search: SerperSearch, payloadIndex: number) => {
     const organic = Array.isArray(payload?.organic)
       ? payload.organic as Array<Record<string, unknown>>
       : [];
     return organic
-      .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, enrichedInput, search.targetCities))
+      .map((result, resultIndex) => serperCandidate(result, (payloadIndex * 100) + resultIndex, enrichedInput, search.targetCities, genderAudit))
       .filter((candidate): candidate is TalentCandidate => Boolean(candidate));
   };
 
@@ -1057,6 +1196,15 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
     tiers,
     elapsedMs: Date.now() - startedAt,
     mappedCompanies: companyDiscovery.companies,
+    genderAudit: input.genderKey
+      ? {
+          key: input.genderKey,
+          matched: genderAudit.matched,
+          opposite: genderAudit.opposite,
+          unidentified: genderAudit.unidentified,
+          includeUnknown: input.includeUnknownGender === true,
+        }
+      : undefined,
   };
 }
 
@@ -1088,6 +1236,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
       candidates: [] as TalentCandidate[],
       pool: [] as TalentCandidate[],
       mappedCompanies: [] as string[],
+      genderAudit: undefined,
       providers: [] as ProviderSearchStatus[],
       configured: false,
     };
@@ -1103,10 +1252,14 @@ export async function searchTalentSources(input: TalentSearchInput) {
     const evidenceNote = requiredCount
       ? ` Evidência dos ${requiredCount} critério(s) obrigatório(s): ${result.tiers.A} perfil(is) completo(s), ${result.tiers.B} parcial(is), ${result.tiers.C} sem evidência pública.`
       : "";
+    const genderNote = result.genderAudit
+      ? ` Chave de gênero (${result.genderAudit.key}): ${result.genderAudit.matched} perfil(is) confirmado(s); ${result.genderAudit.opposite} de gênero divergente e ${result.genderAudit.unidentified} sem identificação foram ${result.genderAudit.includeUnknown ? "parcialmente mantidos" : "separados da lista"}.`
+      : "";
     return {
       candidates: result.candidates,
       pool: result.pool,
       mappedCompanies: result.mappedCompanies,
+      genderAudit: result.genderAudit,
       providers: [{
         provider: "serper" as const,
         label: PROVIDER.label,
@@ -1117,7 +1270,8 @@ export async function searchTalentSources(input: TalentSearchInput) {
         elapsedMs: result.elapsedMs,
         tiers: result.tiers,
         mappedCompanies: result.mappedCompanies,
-        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope}${result.mappedCompanies.length ? `, mapeou ${result.mappedCompanies.length} empresa(s) do segmento` : ""}, avaliou ${result.poolSize} perfil(is) público(s) e classificou os ${result.candidates.length} melhores.${evidenceNote}`,
+        genderAudit: result.genderAudit,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope}${result.mappedCompanies.length ? `, mapeou ${result.mappedCompanies.length} empresa(s) do segmento` : ""}, avaliou ${result.poolSize} perfil(is) público(s) e classificou os ${result.candidates.length} melhores.${evidenceNote}${genderNote}`,
       }],
       configured: true,
     };
@@ -1126,6 +1280,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
       candidates: [] as TalentCandidate[],
       pool: [] as TalentCandidate[],
       mappedCompanies: [] as string[],
+      genderAudit: undefined,
       providers: [{
         provider: "serper" as const,
         label: PROVIDER.label,
