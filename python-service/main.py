@@ -29,6 +29,11 @@ class JobInput(BaseModel):
     description: str = Field(default="", max_length=20_000)
     keywords: list[str] = Field(default_factory=list, max_length=12)
     nationwide: bool = False
+    # Chave de gênero. Vazia = desligada. O motor NÃO usa este campo na
+    # pontuação: ele existe apenas para registrar na planilha e na auditoria
+    # qual recorte de sourcing foi aplicado na camada de busca.
+    genderKey: str = Field(default="", max_length=12)
+    includeUnknownGender: bool = False
 
 
 class IntelligenceRequest(BaseModel):
@@ -60,19 +65,29 @@ def health() -> dict[str, str]:
 def analyze(request: IntelligenceRequest) -> dict[str, Any]:
     job = request.job.model_dump()
     if request.candidates:
-        intelligence, ranked = rank_candidates(job, request.candidates)
+        intelligence, ranked, expansion = rank_candidates(job, request.candidates)
     else:
         intelligence = analyze_job(job)
         ranked = []
+        expansion = []
     return {
         "ok": True,
         "engine": "Python 3 · motor multilíngue",
         "jobIntelligence": intelligence_payload(intelligence),
         "candidates": ranked,
+        # Perfis avaliados e reprovados, com o motivo explícito. Servem para
+        # explicar uma busca sem aprovados — nunca entram na lista principal.
+        "expansionCandidates": expansion[:20],
+        "expansionCount": len(expansion),
         "guardrails": {
             "professionalEvidenceOnly": True,
             "sensitiveTraitsExcluded": True,
             "humanDecisionRequired": True,
+            # A chave de gênero, quando ativa, atua apenas no recorte de
+            # sourcing da camada de busca. Nenhum ponto de aderência é somado
+            # ou subtraído por gênero em nenhuma etapa do motor.
+            "genderKeyAffectsScore": False,
+            "genderKey": job.get("genderKey") or "",
         },
     }
 
