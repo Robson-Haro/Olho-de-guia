@@ -681,10 +681,49 @@ def detected_skills(description: str, explicit_keywords: Iterable[str] = ()) -> 
     return unique(result)[:10]
 
 
+def required_concepts_from_description(description: str) -> list[str]:
+    """Extrai requisitos técnicos declarados quando a tela não os separou em chips.
+
+    A interface recebe muitas vagas coladas diretamente da Gupy. Antes, nessa
+    situação, os requisitos ficavam apenas na descrição e o motor retornava
+    ``requiredKeywords=[]``: qualquer Analista de Sistemas recebia nota de
+    candidato aderente mesmo sem SAP, TOTVS ou integrações. Só termos já
+    curados em ``SKILL_GROUPS`` entram automaticamente; texto genérico nunca
+    vira requisito eliminatório.
+    """
+    text = normalize(description)
+    requirement_markers = (
+        "requisitos", "requisito", "obrigatorio", "obrigatoria",
+        "necessario", "necessaria", "conhecimento em", "conhecimentos em",
+        "experiencia em", "experiencia com", "dominio de",
+    )
+    if not any(marker in text for marker in requirement_markers):
+        return []
+    found: list[str] = []
+    for label, aliases in SKILL_GROUPS.items():
+        if any(phrase_in(text, alias) for alias in aliases):
+            found.append(label)
+    # Tecnologias de TA/Sistemas que podem não estar na taxonomia geral, mas
+    # cujo nome exato é uma evidência objetiva e verificável no trecho público.
+    for term in (
+        "totvs protheus", "sap successfactors", "successfactors employee central",
+        "employee central", "apis rest", "api rest", "webservices", "xml", "json",
+    ):
+        if phrase_in(text, term):
+            found.append(term)
+    return unique(found)[:8]
+
+
 def analyze_job(job: dict[str, Any]) -> JobIntelligence:
     title = str(job.get("title") or "").strip()
     description = str(job.get("description") or "").strip()
     explicit = job.get("keywords") if isinstance(job.get("keywords"), list) else []
+    # Os chips preenchidos pelo recrutador têm prioridade. Para vagas coladas
+    # sem chips, completamos apenas com competências técnicas curadas que estão
+    # explicitamente descritas como requisitos.
+    required_input = [str(item) for item in explicit if str(item).strip()]
+    if not required_input:
+        required_input = required_concepts_from_description(description)
     family = detect_family(title, description)
     level = detect_level(title)
     return JobIntelligence(
@@ -692,8 +731,8 @@ def analyze_job(job: dict[str, Any]) -> JobIntelligence:
         family_label=ROLE_FAMILIES[family]["label"] if family else "Função específica",
         level=level,
         equivalent_titles=tuple(equivalent_titles(title, family, level)),
-        skills=tuple(detected_skills(description, explicit)),
-        required_keywords=tuple(keyword_concepts(explicit)),
+        skills=tuple(detected_skills(description, required_input)),
+        required_keywords=tuple(keyword_concepts(required_input)),
     )
 
 
