@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { searchTalentSources } from "@/lib/talent-sources";
 import { geographicLocationLabel, getCountryProfile } from "@/lib/geography";
+import { isGenderKey } from "@/lib/gender-inference";
 
 type SearchRequest = {
   title?: string;
@@ -20,6 +21,8 @@ type SearchRequest = {
   nationwide?: boolean;
   maxCandidates?: number;
   strictRequiredKeywords?: boolean;
+  genderKey?: string;
+  includeUnknownGender?: boolean;
 };
 
 function clean(value: unknown, limit = 500) {
@@ -94,6 +97,10 @@ export async function POST(request: Request) {
       );
     }
 
+    // Chave de gênero. Valor desconhecido é tratado como desligado: nenhuma
+    // busca deve aplicar um recorte que o servidor não reconhece.
+    const genderKey = isGenderKey(body.genderKey) ? body.genderKey : "";
+
     const geography = { countryCode, subdivision, cities, countrywide };
     const strategies = manualStrategies(title, geography, keywords);
     const result = await searchTalentSources({
@@ -111,6 +118,8 @@ export async function POST(request: Request) {
       countrywide,
       maxCandidates,
       strictRequiredKeywords: body.strictRequiredKeywords === true,
+      genderKey,
+      includeUnknownGender: body.includeUnknownGender === true,
     });
 
     if (!result.configured) {
@@ -154,6 +163,7 @@ export async function POST(request: Request) {
       },
       providers: result.providers,
       mappedCompanies: result.mappedCompanies,
+      genderAudit: result.genderAudit,
       strategies,
     });
   } catch (error) {
