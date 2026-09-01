@@ -11,6 +11,12 @@ export type CandidateEvidence = {
 
 export type EvidenceAssessmentInput = {
   jobTitle: string;
+  /**
+   * Títulos equivalentes produzidos pelo motor multilíngue. A vaga pode ser
+   * "Gerente de Produção" e o mercado usar "Production Manager"; comparar
+   * apenas o texto digitado criava falsos negativos antes da reavaliação.
+   */
+  roleAlternatives?: string[];
   candidateTitle: string;
   candidateText: string;
   requiredConcepts: Array<{ label: string; aliases: string[] }>;
@@ -48,13 +54,51 @@ const COMPLEXITY_SIGNALS = [
   "long term incentive", "lti", "mercer", "korn ferry", "hay group", "job evaluation",
 ];
 
+/**
+ * Equivalências de vocabulário funcional entre português, inglês e espanhol.
+ * O motor Python já envia títulos equivalentes, mas o mercado combina as
+ * palavras em ordens diferentes ("Payroll & Benefits" x "Benefícios e Folha").
+ * Este mapa garante que o TERMO seja reconhecido mesmo quando o TÍTULO inteiro
+ * não coincide com nenhuma das variantes previstas.
+ */
 const ROLE_EQUIVALENTS: Record<string, string[]> = {
-  remuneracao: ["remuneracao", "compensation", "rewards"],
+  remuneracao: ["remuneracao", "compensation", "rewards", "compensacion"],
   beneficios: ["beneficios", "benefits"],
   total: ["total"],
   rewards: ["rewards", "remuneracao", "compensation"],
   compensation: ["compensation", "remuneracao", "rewards"],
   benefits: ["benefits", "beneficios"],
+  recrutamento: ["recrutamento", "recruiting", "recruitment", "reclutamiento", "talent acquisition"],
+  selecao: ["selecao", "selection", "seleccion", "staffing"],
+  pessoas: ["pessoas", "people", "personas"],
+  talentos: ["talentos", "talent", "talento"],
+  producao: ["producao", "production", "manufacturing", "produccion"],
+  manutencao: ["manutencao", "maintenance", "mantenimiento", "reliability"],
+  qualidade: ["qualidade", "quality", "calidad"],
+  logistica: ["logistica", "logistics", "supply chain", "cadena de suministro"],
+  suprimentos: ["suprimentos", "procurement", "purchasing", "compras", "sourcing"],
+  compras: ["compras", "procurement", "purchasing", "sourcing"],
+  financeiro: ["financeiro", "finance", "financiero", "financial"],
+  controladoria: ["controladoria", "controllership", "controlling", "control de gestion"],
+  contabilidade: ["contabilidade", "accounting", "contabilidad"],
+  fiscal: ["fiscal", "tax", "tributario", "taxation"],
+  comercial: ["comercial", "sales", "commercial", "ventas"],
+  vendas: ["vendas", "sales", "ventas"],
+  marketing: ["marketing", "mercadeo"],
+  dados: ["dados", "data", "datos", "analytics"],
+  tecnologia: ["tecnologia", "technology", "it", "tecnologia da informacao"],
+  processos: ["processos", "process", "procesos"],
+  engenharia: ["engenharia", "engineering", "ingenieria"],
+  seguranca: ["seguranca", "safety", "seguridad"],
+  treinamento: ["treinamento", "training", "capacitacion", "learning"],
+  desenvolvimento: ["desenvolvimento", "development", "desarrollo"],
+  trabalhistas: ["trabalhistas", "labor relations", "employee relations", "laborales"],
+  sindicais: ["sindicais", "union relations", "sindicales", "labor relations"],
+  folha: ["folha", "payroll", "nomina"],
+  pagamento: ["pagamento", "payroll", "payment", "nomina"],
+  industrial: ["industrial", "manufacturing", "plant"],
+  planejamento: ["planejamento", "planning", "planificacion"],
+  precificacao: ["precificacao", "pricing", "precios"],
 };
 
 const STOP = new Set([
@@ -101,11 +145,34 @@ function signalEvidence(text: string, signals: string[]) {
 
 export function assessCandidateEvidence(input: EvidenceAssessmentInput): EvidenceAssessment {
   const candidateText = [input.candidateTitle, input.candidateText].filter(Boolean).join(" · ");
-  const jobTokens = roleTokens(input.jobTitle);
-  const matchedRoleTokens = jobTokens.filter((token) =>
-    (ROLE_EQUIVALENTS[token] || [token]).some((alias) => contains(input.candidateTitle, alias)),
-  );
-  const roleCoverage = jobTokens.length ? matchedRoleTokens.length / jobTokens.length : 0;
+  const roleOptions = [...new Set([input.jobTitle, ...(input.roleAlternatives || [])].filter(Boolean))];
+  // O título devolvido pelo Google nem sempre existe: quando o resultado não
+  // traz separador, o parser entrega "Perfil profissional no LinkedIn" e a
+  // aderência funcional caía a zero — eliminando profissionais corretos por
+  // falha de formatação do snippet, não por incompatibilidade. A evidência do
+  // cargo passa a ser buscada também no corpo do trecho público, com peso
+  // menor: confirmar no título continua valendo mais do que citar no texto.
+  const TEXT_EVIDENCE_WEIGHT = 0.6;
+  const roleMatches = roleOptions.map((role) => {
+    const tokens = roleTokens(role);
+    const matched: string[] = [];
+    let weighted = 0;
+    for (const token of tokens) {
+      const aliases = ROLE_EQUIVALENTS[token] || [token];
+      if (aliases.some((alias) => contains(input.candidateTitle, alias))) {
+        matched.push(token);
+        weighted += 1;
+      } else if (aliases.some((alias) => contains(input.candidateText, alias))) {
+        matched.push(token);
+        weighted += TEXT_EVIDENCE_WEIGHT;
+      }
+    }
+    return { role, tokens, matched, coverage: tokens.length ? weighted / tokens.length : 0 };
+  });
+  const bestRoleMatch = roleMatches.sort((left, right) => right.coverage - left.coverage)[0]
+    || { role: input.jobTitle, tokens: [], matched: [], coverage: 0 };
+  const matchedRoleTokens = bestRoleMatch.matched;
+  const roleCoverage = bestRoleMatch.coverage;
   const roleScore = Math.round(25 * roleCoverage);
 
   const jobRank = seniorityRank(input.jobTitle);
@@ -176,7 +243,9 @@ export function assessCandidateEvidence(input: EvidenceAssessmentInput): Evidenc
         status: roleCoverage >= 0.75 ? "confirmed" : roleCoverage >= 0.5 ? "unconfirmed" : "failed",
         score: roleScore,
         maxScore: 25,
-        evidence: matchedRoleTokens.length ? `Termos do cargo: ${matchedRoleTokens.join(", ")}` : "sem evidência do cargo correto",
+        evidence: matchedRoleTokens.length
+          ? `Termos do cargo: ${matchedRoleTokens.join(", ")}${bestRoleMatch.role !== input.jobTitle ? ` · título equivalente: ${bestRoleMatch.role}` : ""}`
+          : "sem evidência do cargo correto",
       },
       {
         criterion: "seniority",
