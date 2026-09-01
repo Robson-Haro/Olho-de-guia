@@ -131,3 +131,27 @@ header{gap:16px;flex-wrap:wrap}
   .headerActions{width:100%;justify-content:flex-start}
   .profile{margin-left:auto}
 }
+
+/* Chave de gênero — sourcing de diversidade */
+.genderKeyPanel{border:1px solid #b06ff32b;border-radius:18px;background:radial-gradient(circle at 15% 0,#7a3bd433,transparent 55%),#04101dcc;padding:18px;margin-top:4px}
+.genderKeyHeader{display:flex;align-items:center;justify-content:space-between;color:#c79bff;margin-bottom:14px}
+.genderKeyHeader h4{margin:4px 0 0;color:#fff}
+.genderKeyControls{display:grid;grid-template-columns:minmax(240px,.85fr) 1.15fr;gap:14px;align-items:start}
+.genderKeyControls>label{display:grid;gap:7px}
+.genderKeyControls>label>span{color:#c8d8e7;font-weight:800}
+.genderKeyPanel select{width:100%;min-width:0;border:1px solid #c78dff3d;background:#020a14;color:#fff;padding:13px 14px;border-radius:10px;outline:0;color-scheme:dark}
+.genderKeyPanel select:focus{border-color:#c78dff;box-shadow:0 0 0 3px #c78dff1f}
+.genderUnknownToggle{display:flex!important;align-items:flex-start;gap:12px;padding:13px 14px;border:1px solid #c78dff30;border-radius:12px;background:#120a24aa;cursor:pointer}
+.genderUnknownToggle input{width:22px!important;height:22px;flex:0 0 22px;margin-top:2px;accent-color:#a970ff}
+.genderUnknownToggle span{display:grid;gap:4px}
+.genderUnknownToggle strong{color:#efe3ff}
+.genderUnknownToggle small{color:#a794bd;font-weight:400;font-size:10px;line-height:1.45}
+.genderKeyNotice{display:flex;align-items:flex-start;gap:9px;margin-top:14px;padding:12px 13px;border-radius:10px;color:#cdb6e8;background:#2a0f4a55;border:1px solid #a970ff33;font-size:11px;line-height:1.5}
+.genderKeyNotice svg{flex:0 0 auto;color:#c78dff}
+.genderKeyNotice strong{color:#fff}
+.genderKeyHint{display:block;margin-top:12px;color:#8faec4;font-size:10px;line-height:1.45}
+.genderAuditBar{background:#2a0f4a4d}
+.genderAuditBar svg{color:#c78dff}
+.genderTag{display:inline-block;margin-top:7px;padding:3px 8px;border-radius:20px;font-size:9px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:#e6d4ff;background:#3a1568;border:1px solid #a970ff4d}
+.genderTag.masculino{color:#cfe6ff;background:#0d3358;border-color:#4da2ff4d}
+@media(max-width:720px){.genderKeyControls{grid-template-columns:1fr}}
