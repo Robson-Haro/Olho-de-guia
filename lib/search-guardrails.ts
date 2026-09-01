@@ -1,3 +1,29 @@
+/**
+ * Orçamento de palavras da consulta ao Google.
+ *
+ * O Google descarta silenciosamente o excedente de uma consulta longa. Com
+ * título + 10 sinônimos da palavra-chave + 12 empresas + 8 cidades, o final da
+ * consulta — justamente a geografia — era ignorado, e a busca voltava com
+ * profissionais certos em países errados. Os blocos chegam aqui em ordem de
+ * prioridade e o primeiro que não couber é descartado INTEIRO, preservando a
+ * validade sintática dos grupos OR.
+ */
+export const MAX_QUERY_WORDS = 30;
+
+export function boundedSearchQuery(parts: string[], limit = MAX_QUERY_WORDS) {
+  const accepted: string[] = [];
+  let words = 0;
+  for (const part of parts) {
+    const block = String(part || "").replace(/\s+/g, " ").trim();
+    if (!block) continue;
+    const cost = block.split(" ").length;
+    if (words + cost > limit) continue;
+    accepted.push(block);
+    words += cost;
+  }
+  return accepted.join(" ");
+}
+
 function normalize(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
