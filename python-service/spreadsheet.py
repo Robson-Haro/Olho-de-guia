@@ -26,7 +26,25 @@ HEADERS = [
     "LinkedIn",
     "Fonte",
     "País",
+    # Preenchidas apenas quando a chave de gênero foi usada na busca. Sem a
+    # chave, as colunas ficam vazias e nada de gênero é gravado no arquivo.
+    "Gênero (inferido)",
+    "Base da inferência de gênero",
 ]
+
+LAST_COLUMN = "P"
+
+
+def gender_columns(candidate: dict[str, Any]) -> tuple[str, str]:
+    gender = candidate.get("gender")
+    if not isinstance(gender, dict):
+        return "", ""
+    value = str(gender.get("value") or "")
+    if not value or value == "indeterminado":
+        return "não identificado", str(gender.get("basis") or "")
+    confidence = gender.get("confidence")
+    label = f"{value} · {confidence}%" if confidence else value
+    return label, str(gender.get("basis") or "")
 
 
 def safe_cell_value(value: Any) -> Any:
@@ -42,7 +60,7 @@ def create_candidate_workbook(job: dict[str, Any], candidates: Iterable[dict[str
     sheet = workbook.active
     sheet.title = "Candidatos"
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:N1"
+    sheet.auto_filter.ref = f"A1:{LAST_COLUMN}1"
 
     header_fill = PatternFill("solid", fgColor="07152B")
     accent_fill = PatternFill("solid", fgColor="006EB8")
@@ -75,6 +93,7 @@ def create_candidate_workbook(job: dict[str, Any], candidates: Iterable[dict[str
             candidate.get("profileUrl") or "",
             candidate.get("source") or "Google via Serper",
             candidate.get("country") or "",
+            *gender_columns(candidate),
         ]
         for column, value in enumerate(values, start=1):
             cell = sheet.cell(row=row_index, column=column, value=safe_cell_value(value))
@@ -86,7 +105,7 @@ def create_candidate_workbook(job: dict[str, Any], candidates: Iterable[dict[str
             link_cell.hyperlink = link
             link_cell.font = link_font
 
-    widths = [10, 12, 22, 28, 32, 25, 20, 16, 34, 54, 58, 45, 20, 20]
+    widths = [10, 12, 22, 28, 32, 25, 20, 16, 34, 54, 58, 45, 20, 20, 22, 52]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
 
@@ -100,6 +119,21 @@ def create_candidate_workbook(job: dict[str, Any], candidates: Iterable[dict[str
     details.append(["Todo o país", "Sim" if job.get("countrywide") is True or job.get("nationwide") is True else "Não"])
     details.append(["Descrição da vaga", safe_cell_value(job.get("description") or "")])
     details.append(["Gerado em UTC", datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")])
+    gender_key = str(job.get("genderKey") or "")
+    details.append([
+        "Chave de gênero",
+        "Desligada — nenhuma inferência de gênero foi executada nesta busca"
+        if not gender_key
+        else f"{gender_key} · perfis sem identificação "
+             + ("mantidos na lista" if job.get("includeUnknownGender") else "separados da lista"),
+    ])
+    if gender_key:
+        details.append([
+            "Uso da chave de gênero",
+            "Recorte aplicado na etapa de sourcing para apoiar metas de diversidade. "
+            "A inferência é probabilística, usa apenas pronome declarado, forma do cargo e prenome, "
+            "e não soma nem subtrai pontos de aderência em nenhuma etapa do motor.",
+        ])
     details.append(["Critério", "Ranking profissional explicável; decisão final deve ser humana."])
     for cell in details[1]:
         cell.fill = header_fill
