@@ -77,6 +77,12 @@ type Candidate = {
   tier?: "A" | "B" | "C";
   tierLabel?: string;
   seniorityLabel?: string;
+  gender?: {
+    value: "feminino" | "masculino" | "indeterminado";
+    confidence: number;
+    source: string;
+    basis: string;
+  };
   scoreBreakdown?: {
     cargo: number;
     senioridade: number;
@@ -86,6 +92,16 @@ type Candidate = {
     evidencia?: number;
     segmento?: number;
   };
+};
+
+type GenderKey = "" | "feminino" | "masculino";
+
+type GenderAudit = {
+  key: GenderKey;
+  matched: number;
+  opposite: number;
+  unidentified: number;
+  includeUnknown: boolean;
 };
 
 type JobForm = {
@@ -98,7 +114,17 @@ type JobForm = {
   description: string;
   keywords: string[];
   countrywide: boolean;
+  /** Chave de gênero para sourcing de diversidade. Vazio = desligada. */
+  genderKey: GenderKey;
+  /** Mantém na lista quem o sistema não conseguiu identificar. */
+  includeUnknownGender: boolean;
 };
+
+const GENDER_OPTIONS: Array<{ value: GenderKey; label: string }> = [
+  { value: "", label: "Todos os gêneros (chave desligada)" },
+  { value: "feminino", label: "Feminino" },
+  { value: "masculino", label: "Masculino" },
+];
 
 type JobIntelligence = {
   family?: string | null;
@@ -121,6 +147,7 @@ type ProviderSearchStatus = {
   elapsedMs?: number;
   tiers?: { A: number; B: number; C: number };
   mappedCompanies?: string[];
+  genderAudit?: GenderAudit;
 };
 
 type TalentSourceStatus = {
@@ -166,7 +193,11 @@ export default function HomePage() {
     description: "",
     keywords: ["", "", "", ""],
     countrywide: false,
+    genderKey: "",
+    includeUnknownGender: false,
   });
+  const [genderAudit, setGenderAudit] = useState<GenderAudit | null>(null);
+  const [expansionCount, setExpansionCount] = useState(0);
   const [searchStatus, setSearchStatus] = useState<"idle" | "working" | "completed" | "empty" | "error">("idle");
   const [searchMessage, setSearchMessage] = useState("");
   const [searchStrategies, setSearchStrategies] = useState<SearchStrategy[]>([]);
@@ -338,7 +369,7 @@ export default function HomePage() {
   }
   function prepareManualJob() {
     setImportedJob(null);
-    setJobForm({ title: "", marketSegment: "", countryCode: "BR", subdivision: "", cityCount: 1, cities: [""], description: "", keywords: ["", "", "", ""], countrywide: false });
+    setJobForm({ title: "", marketSegment: "", countryCode: "BR", subdivision: "", cityCount: 1, cities: [""], description: "", keywords: ["", "", "", ""], countrywide: false, genderKey: "", includeUnknownGender: false });
     setMessage("Preencha os dados abaixo e inicie a busca.");
     setSearchStatus("idle");
     setSearchStrategies([]);
@@ -346,6 +377,8 @@ export default function HomePage() {
     setJobIntelligence(null);
     setPythonRankingActive(false);
     setPythonEvaluatedCount(0);
+    setGenderAudit(null);
+    setExpansionCount(0);
   }
 
   async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = [], mappedCompanies: string[] = []) {
@@ -381,6 +414,8 @@ export default function HomePage() {
     setJobIntelligence(null);
     setPythonRankingActive(false);
     setPythonEvaluatedCount(0);
+    setGenderAudit(null);
+    setExpansionCount(0);
     setExportMessage("");
     try {
       let enrichedSearch = {
@@ -420,6 +455,7 @@ export default function HomePage() {
       const data = await response.json();
       setSearchStrategies(Array.isArray(data.strategies) ? data.strategies : []);
       setProviderResults(Array.isArray(data.providers) ? data.providers : []);
+      setGenderAudit(data.genderAudit || null);
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
       const foundCandidates = Array.isArray(data.candidates) ? data.candidates as Candidate[] : [];
       // O Python precisa reavaliar o conjunto amplo encontrado pelo Serper,
@@ -428,6 +464,9 @@ export default function HomePage() {
         ? (data.pool as Candidate[])
         : foundCandidates;
       let rankedCandidates = foundCandidates;
+      // Quantos perfis o motor avaliou e reprovou. Serve para explicar uma
+      // busca sem aprovados em vez de exibir apenas "0 perfis".
+      let expansionTotal = 0;
       if (evaluationPool.length && pythonPrepared) {
         try {
           setSearchMessage(`Reavaliando ${evaluationPool.length} perfis pelo motor Python multilíngue...`);
@@ -437,6 +476,8 @@ export default function HomePage() {
             rankedCandidates = rankingData.candidates.slice(0, candidateLimit);
             setPythonRankingActive(true);
             setPythonEvaluatedCount(evaluationPool.length);
+            expansionTotal = Number(rankingData.expansionCount) || 0;
+            setExpansionCount(expansionTotal);
             if (rankingData.jobIntelligence) {
               resolvedJobIntelligence = rankingData.jobIntelligence;
               setJobIntelligence(rankingData.jobIntelligence);
@@ -461,9 +502,15 @@ export default function HomePage() {
       setSearchStatus(limitedCandidates.length ? "completed" : "empty");
       setSearchMessage(limitedCandidates.length
         ? `Busca concluída: ${evaluatedProfiles} perfil(is) público(s) avaliados em ${queriesUsed} consulta(s) e ${limitedCandidates.length} selecionado(s)${requiredKeywordCount ? ` com ${requiredKeywordCount} critério(s) prioritário(s)` : ""}${pythonPrepared ? ", cargos equivalentes em três idiomas" : ""}${limitedCandidates[0]?.rankingEngine ? " e ranking Python confirmado" : ""}.`
-        : requiredKeywordCount
-          ? `A busca executou ${queriesUsed} consulta(s), mas não encontrou perfis públicos suficientes para classificar. Revise os critérios ou amplie a localização.`
-          : `A busca adaptativa executou ${queriesUsed} consulta(s), mas nenhum perfil público do LinkedIn correspondeu ao cargo e à localização. Tente um título alternativo para a vaga.`);
+        : `A busca executou ${queriesUsed} consulta(s) e não aprovou nenhum perfil.${
+            data.genderAudit
+              ? ` A chave de gênero (${data.genderAudit.key}) separou ${data.genderAudit.opposite} perfil(is) de gênero divergente e ${data.genderAudit.unidentified} sem identificação — considere marcar "manter perfis não identificados".`
+              : ""
+          }${
+            Number(expansionTotal) > 0
+              ? ` ${expansionTotal} perfil(is) foram avaliados e reprovados; o motivo de cada reprovação está registrado na auditoria.`
+              : ""
+          } Revise o título, os critérios prioritários ou amplie a localização.`);
       localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, country: selectedCountryProfile.name, cities: selectedCities, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, mappedCompanies: data.mappedCompanies || [], createdAt: new Date().toISOString() }));
     } catch (error) {
       setSearchStatus("error");
@@ -843,6 +890,62 @@ export default function HomePage() {
                     {jobForm.keywords.map((keyword, index) => <input key={index} value={keyword} onChange={(e) => updateKeyword(index, e.target.value)} placeholder={`Palavra-chave ${index + 1}`} />)}
                     <small className="keywordHint">Cada campo vira um critério prioritário. O Eureka aceita equivalentes em português, inglês e espanhol e sinaliza quando a evidência pública precisa ser confirmada no LinkedIn.</small>
                   </fieldset>
+                  <section className="full genderKeyPanel" aria-labelledby="gender-key-title">
+                    <div className="genderKeyHeader">
+                      <div>
+                        <span className="kicker">CHAVE DE GÊNERO · SOURCING DE DIVERSIDADE</span>
+                        <h4 id="gender-key-title">Recortar a busca por gênero?</h4>
+                      </div>
+                      <UsersRound size={26} />
+                    </div>
+                    <div className="genderKeyControls">
+                      <label>
+                        <span>Gênero da busca</span>
+                        <select
+                          value={jobForm.genderKey}
+                          onChange={(event) => setJobForm({ ...jobForm, genderKey: event.target.value as GenderKey })}
+                          aria-label="Chave de gênero da busca"
+                        >
+                          {GENDER_OPTIONS.map((option) => (
+                            <option key={option.value || "todos"} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {jobForm.genderKey && (
+                        <label className="genderUnknownToggle">
+                          <input
+                            type="checkbox"
+                            checked={jobForm.includeUnknownGender}
+                            onChange={(event) => setJobForm({ ...jobForm, includeUnknownGender: event.target.checked })}
+                          />
+                          <span>
+                            <strong>Manter perfis não identificados</strong>
+                            <small>
+                              Prenomes usados por homens e mulheres — Alex, Ariel, Darci — e cargos neutros como
+                              Gerente ou Analista não permitem conclusão. Sem esta opção, esses perfis ficam de fora
+                              mesmo quando pertencem ao gênero procurado.
+                            </small>
+                          </span>
+                        </label>
+                      )}
+                    </div>
+                    {jobForm.genderKey ? (
+                      <div className="genderKeyNotice">
+                        <ShieldCheck size={17} />
+                        <span>
+                          A chave altera as consultas ao Google — cargo flexionado e pronome declarado no perfil — e
+                          exibe apenas perfis com gênero identificado como <strong>{jobForm.genderKey}</strong>.
+                          A inferência usa somente pronome declarado, forma do cargo e prenome, é probabilística e
+                          não soma nem subtrai pontos de aderência. Todo perfil separado fica registrado na auditoria
+                          e na planilha. A decisão final continua humana.
+                        </span>
+                      </div>
+                    ) : (
+                      <small className="genderKeyHint">
+                        Desligada: nenhuma inferência de gênero é executada, gravada ou exportada.
+                      </small>
+                    )}
+                  </section>
                   <section className="full geographyBuilder" aria-labelledby="geography-title">
                     <div className="geographyHeader">
                       <div>
@@ -896,6 +999,19 @@ export default function HomePage() {
                     </div>)}
                   </div>}
                   {providerResults.some((provider) => provider.mappedCompanies?.length) && <div className="geographyScope full"><Database size={18} /><span><strong>Empresas do segmento mapeadas:</strong> {providerResults.flatMap((provider) => provider.mappedCompanies || []).join(" · ")}</span></div>}
+                  {genderAudit && <div className="geographyScope full genderAuditBar">
+                    <UsersRound size={18} />
+                    <span>
+                      <strong>Auditoria da chave de gênero ({genderAudit.key}):</strong>{" "}
+                      {genderAudit.matched} perfil(is) confirmado(s) · {genderAudit.opposite} de gênero divergente ·{" "}
+                      {genderAudit.unidentified} sem identificação{genderAudit.includeUnknown ? " (mantidos na lista)" : " (separados da lista)"}.
+                      {!genderAudit.includeUnknown && genderAudit.unidentified > 0 && " Marque \"manter perfis não identificados\" para reavaliá-los."}
+                    </span>
+                  </div>}
+                  {expansionCount > 0 && candidates.length === 0 && <div className="geographyScope full">
+                    <ShieldCheck size={18} />
+                    <span><strong>{expansionCount} perfil(is) avaliados e reprovados.</strong> O motor registrou o motivo de cada reprovação — cargo, senioridade, critérios obrigatórios ou geografia.</span>
+                  </div>}
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
@@ -947,6 +1063,11 @@ export default function HomePage() {
                           </td>
                           <td>
                             <strong>{candidate.name}</strong>
+                            {candidate.gender && candidate.gender.value !== "indeterminado" && (
+                              <small className={`genderTag ${candidate.gender.value}`} title={candidate.gender.basis}>
+                                {candidate.gender.value} · {candidate.gender.confidence}%
+                              </small>
+                            )}
                             {candidate.summary && <small className="candidateSnippet">{candidate.summary}</small>}
                           </td>
                           <td>{candidate.title || "Não identificado"}</td>
@@ -964,7 +1085,7 @@ export default function HomePage() {
                       ))}
                     </tbody>
                   </table>
-                  <p className="scoreDisclaimer">O ranking considera somente informações profissionais da vaga e do trecho público indexado pelo Google. Não usa nem infere características pessoais sensíveis. Confirme o perfil completo no LinkedIn: a decisão final deve ser humana.</p>
+                  <p className="scoreDisclaimer">O ranking considera somente informações profissionais da vaga e do trecho público indexado pelo Google. Não usa nem infere idade, raça, deficiência, saúde, religião ou outros atributos pessoais sensíveis.{genderAudit ? " A chave de gênero recorta o conjunto de sourcing e não altera a pontuação de nenhum perfil." : ""} Confirme o perfil completo no LinkedIn: a decisão final deve ser humana.</p>
                 </div> : <div className="emptyState"><UsersRound size={38} /><strong>{searchStatus === "working" ? "Busca em andamento" : searchStatus === "empty" ? "Busca finalizada sem perfis" : searchStatus === "error" ? "A busca automática não foi executada" : "Nenhuma busca ativada"}</strong><span>{searchStatus === "error" ? "Confira o aviso e conecte o Serper em Configurações." : "Preencha a vaga e consulte os perfis públicos pelo Serper."}</span></div>}
                 {searchStrategies.length > 0 && <div className="manualSearches">
                   <span className="kicker">PESQUISA MANUAL COMPLEMENTAR</span>
