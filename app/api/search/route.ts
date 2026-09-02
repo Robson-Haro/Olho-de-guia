@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { searchTalentSources } from "@/lib/talent-sources";
 import { geographicLocationLabel, getCountryProfile } from "@/lib/geography";
 import { isGenderKey } from "@/lib/gender-inference";
+import { interpretJob, mergeVocabulary } from "@/lib/ai-reader";
+import { estimateCostUsd, isLlmConfigured } from "@/lib/llm";
+import { memorySignals, readRoleMemory, registerSearch, roleKeyFor } from "@/lib/role-memory";
 
 type SearchRequest = {
   title?: string;
@@ -18,6 +21,11 @@ type SearchRequest = {
   keywords?: string[];
   semanticKeywords?: string[];
   requiredKeywordConcepts?: Array<{ label?: string; aliases?: string[] }>;
+  // Vocabulário produzido pelo léxico do motor Python. As duas camadas passam a
+  // julgar sobre o MESMO conjunto de termos.
+  roleCore?: string[];
+  domainConcepts?: string[][];
+  levelTerms?: string[];
   nationwide?: boolean;
   maxCandidates?: number;
   strictRequiredKeywords?: boolean;
@@ -90,6 +98,20 @@ export async function POST(request: Request) {
             : [],
         })).filter((concept) => concept.label && concept.aliases.length).slice(0, 12)
       : [];
+    const roleCore = Array.isArray(body.roleCore)
+      ? body.roleCore.map((item) => clean(item, 80)).filter(Boolean).slice(0, 80)
+      : [];
+    const levelTerms = Array.isArray(body.levelTerms)
+      ? body.levelTerms.map((item) => clean(item, 40)).filter(Boolean).slice(0, 12)
+      : [];
+    const domainConcepts = Array.isArray(body.domainConcepts)
+      ? body.domainConcepts
+          .filter((group): group is string[] => Array.isArray(group))
+          .map((group) => group.map((item) => clean(item, 80)).filter(Boolean).slice(0, 12))
+          .filter((group) => group.length)
+          .slice(0, 14)
+      : [];
+
     if (!title || !description || (!countrywide && !cities.length)) {
       return NextResponse.json(
         { error: "Título, descrição, país e ao menos uma cidade são obrigatórios, exceto em buscas para todo o país." },
@@ -101,12 +123,36 @@ export async function POST(request: Request) {
     // busca deve aplicar um recorte que o servidor não reconhece.
     const genderKey = isGenderKey(body.genderKey) ? body.genderKey : "";
 
+    // ---------------------------------------------------------------- //
+    // ETAPA DE LEITURA (Onda 2)
+    //
+    // O modelo lê a vaga e devolve vocabulário de mercado que o léxico não
+    // cobre. O resultado é SOMADO ao do léxico, nunca substitui: se não houver
+    // chave, se a rede falhar ou se a resposta vier inválida, a busca segue
+    // exatamente como na Onda 1.
+    // ---------------------------------------------------------------- //
+    const reading = await interpretJob(title, description);
+    const vocabulary = mergeVocabulary(
+      { roleCore, domainConcepts, titleVariants, levelTerms },
+      reading?.data || null,
+    );
+
+    // ---------------------------------------------------------------- //
+    // MEMÓRIA DA VAGA
+    //
+    // A chave deriva do núcleo funcional, sem hierarquia: "Supervisor de
+    // Abate" e "Coordenador de Abate" compartilham o que a casa já aprendeu.
+    // ---------------------------------------------------------------- //
+    const roleKey = roleKeyFor(title, vocabulary.roleCore);
+    const memory = await readRoleMemory(roleKey);
+    const learned = memorySignals(memory);
+    void registerSearch(roleKey, title);
+
     const geography = { countryCode, subdivision, cities, countrywide };
     const strategies = manualStrategies(title, geography, keywords);
     const result = await searchTalentSources({
       title,
       marketSegment,
-      titleVariants,
       countryCode,
       country,
       subdivision,
@@ -115,6 +161,14 @@ export async function POST(request: Request) {
       keywords,
       semanticKeywords,
       requiredKeywordConcepts,
+      roleCore: vocabulary.roleCore,
+      domainConcepts: vocabulary.domainConcepts,
+      levelTerms: vocabulary.levelTerms,
+      titleVariants: vocabulary.titleVariants,
+      learnedTitles: learned.learnedTitles,
+      learnedTerms: learned.learnedTerms,
+      learnedCompanies: learned.learnedCompanies,
+      demotedTitles: learned.demotedTitles,
       countrywide,
       maxCandidates,
       strictRequiredKeywords: body.strictRequiredKeywords === true,
@@ -165,6 +219,38 @@ export async function POST(request: Request) {
       mappedCompanies: result.mappedCompanies,
       genderAudit: result.genderAudit,
       strategies,
+      // Vocabulário efetivamente usado, devolvido para que o motor Python
+      // ranqueie sobre exatamente o mesmo conjunto de termos.
+      vocabulary: {
+        roleCore: vocabulary.roleCore,
+        domainConcepts: vocabulary.domainConcepts,
+        titleVariants: vocabulary.titleVariants,
+        levelTerms: vocabulary.levelTerms,
+      },
+      aiReading: {
+        configured: isLlmConfigured(),
+        applied: vocabulary.aiApplied,
+        notes: reading?.data.notes || "",
+        addedTerms: vocabulary.aiApplied
+          ? Math.max(0, vocabulary.roleCore.length - roleCore.length)
+            + Math.max(0, vocabulary.domainConcepts.length - domainConcepts.length)
+            + Math.max(0, vocabulary.titleVariants.length - titleVariants.length)
+          : 0,
+        costUsd: reading ? Number(estimateCostUsd(reading.inputTokens, reading.outputTokens).toFixed(5)) : 0,
+      },
+      memory: {
+        roleKey,
+        roleLabel: title,
+        active: learned.active,
+        searchCount: memory.searchCount,
+        approvedCount: memory.approvedCount,
+        discardedCount: memory.discardedCount,
+        hiredCount: memory.hiredCount,
+        learnedTitles: learned.learnedTitles,
+        learnedTerms: learned.learnedTerms,
+        learnedCompanies: learned.learnedCompanies,
+        demotedTitles: learned.demotedTitles,
+      },
     });
   } catch (error) {
     return NextResponse.json(

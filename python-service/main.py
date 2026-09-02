@@ -34,11 +34,22 @@ class JobInput(BaseModel):
     # qual recorte de sourcing foi aplicado na camada de busca.
     genderKey: str = Field(default="", max_length=12)
     includeUnknownGender: bool = False
+    # Vocabulário ampliado pela camada de leitura (Onda 2). Chega pronto da
+    # camada TypeScript para que o ranking decida sobre EXATAMENTE o mesmo
+    # conjunto de termos usado na busca. Vazio = só o léxico, como na Onda 1.
+    roleCoreExtra: list[str] = Field(default_factory=list, max_length=80)
+    domainConceptsExtra: list[list[str]] = Field(default_factory=list, max_length=20)
+    titleVariantsExtra: list[str] = Field(default_factory=list, max_length=24)
+    # Sinais da memória da vaga: títulos e termos que já produziram aprovação.
+    learnedTitles: list[str] = Field(default_factory=list, max_length=12)
+    learnedTerms: list[str] = Field(default_factory=list, max_length=24)
+    learnedCompanies: list[str] = Field(default_factory=list, max_length=12)
+    demotedTitles: list[str] = Field(default_factory=list, max_length=20)
 
 
 class IntelligenceRequest(BaseModel):
     job: JobInput
-    candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=120)
+    candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=400)
 
 
 class ExportRequest(BaseModel):

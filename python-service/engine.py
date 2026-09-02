@@ -15,6 +15,17 @@ import re
 import unicodedata
 from typing import Any, Iterable
 
+from lexicon import (
+    SYNONYM_GROUPS,
+    evidence_groups,
+    is_weak_title_noun,
+    expand as lexicon_expand,
+    group_label,
+    groups_for_term,
+    groups_in_text,
+    specific_groups,
+)
+
 
 STOP_WORDS = {
     # Português
@@ -454,6 +465,17 @@ class JobIntelligence:
     equivalent_titles: tuple[str, ...]
     skills: tuple[str, ...]
     required_keywords: tuple[KeywordConcept, ...]
+    # Núcleo funcional do cargo e vocabulário distintivo da vaga, ambos já
+    # expandidos para português, inglês e espanhol pelo léxico. São estes dois
+    # conjuntos — e não mais a família profissional — que decidem elegibilidade,
+    # e são eles que a camada TypeScript recebe para julgar sobre exatamente o
+    # mesmo vocabulário. Enquanto cada motor mantinha a própria lista, os dois
+    # se eliminavam mutuamente.
+    role_core: tuple[str, ...] = ()
+    domain_terms: tuple[str, ...] = ()
+    domain_concepts: tuple[tuple[str, ...], ...] = ()
+    role_groups: frozenset[int] = frozenset()
+    domain_groups: frozenset[int] = frozenset()
 
 
 @lru_cache(maxsize=20_000)
@@ -615,10 +637,38 @@ def title_case(value: str) -> str:
                     for index, word in enumerate(value.split()))
 
 
-def equivalent_titles(title: str, family_key: str | None, level: str | None) -> list[str]:
-    variants = [title]
+def _lexicon_titles(title: str, level: str | None, role_groups: frozenset[int]) -> list[str]:
+    """Títulos equivalentes montados a partir do léxico, para QUALQUER cargo.
+
+    A geração anterior dependia de a vaga cair numa das 19 famílias cadastradas.
+    Fora delas — abate, comércio exterior, trading, veterinária, meio ambiente —
+    o motor devolvia apenas o título digitado, e a busca em inglês e espanhol
+    simplesmente não acontecia.
+    """
+    if not role_groups:
+        return []
+    # Devolve o NÚCLEO funcional puro, sem compor a hierarquia. Compor produzia
+    # híbridos que não existem no mercado ("Supervisor de Slaughter") e gastava
+    # consultas do Serper com expressões que o Google nunca encontra. A
+    # combinação com o nível é feita na camada de busca, que junta os dois
+    # blocos — ("supervisor" OR "supervisora") ("abate" OR "slaughter") — e
+    # alcança qualquer ordem de palavras.
+    variants: list[str] = []
+    for index in sorted(role_groups):
+        for synonym in SYNONYM_GROUPS[index][:4]:
+            variants.append(title_case(synonym))
+    return variants
+
+
+def equivalent_titles(
+    title: str,
+    family_key: str | None,
+    level: str | None,
+    role_groups: frozenset[int] = frozenset(),
+) -> list[str]:
+    variants = [title, *_lexicon_titles(title, level, role_groups)]
     if not family_key:
-        return unique(variants)
+        return unique(variants)[:16]
 
     family = ROLE_FAMILIES[family_key]
     functions = family["functions"]
@@ -653,7 +703,79 @@ def equivalent_titles(title: str, family_key: str | None, level: str | None) -> 
     return unique(variants)[:16]
 
 
-def detected_skills(description: str, explicit_keywords: Iterable[str] = ()) -> list[str]:
+# Verbos e conectores típicos de texto de anúncio de vaga. Sem esta trava, a
+# extração por frequência devolvia "Supervisionar", "Garantir" e "Realizar" como
+# se fossem competências, e passava a cobrar do candidato que ele repetisse o
+# verbo da descrição no próprio perfil.
+JOB_POSTING_VERBS = {
+    "supervisionar", "garantir", "realizar", "acompanhar", "elaborar", "executar",
+    "coordenar", "gerenciar", "administrar", "conduzir", "promover", "assegurar",
+    "atuar", "auxiliar", "participar", "definir", "propor", "manter", "zelar",
+    "identificar", "avaliar", "monitorar", "reportar", "planejar", "organizar",
+    "estabelecer", "implementar", "implantar", "desenvolver", "controlar",
+    "verificar", "analisar", "revisar", "validar", "aplicar", "buscar",
+    "ensure", "manage", "lead", "develop", "execute", "support", "deliver",
+    "gestionar", "garantizar", "asegurar", "realizar", "desarrollar",
+}
+
+# Fragmentos que aparecem sozinhos quando uma expressão hifenizada é quebrada
+# ("bem-estar" vira "bem" e "estar"). Nenhum deles é competência.
+WORD_FRAGMENTS = {
+    "estar", "bem", "sendo", "todo", "toda", "todos", "todas", "cada", "onde",
+    "quando", "muito", "muita", "mais", "menos", "seja", "sejam", "deve", "devem",
+    "seus", "suas", "nosso", "nossa", "nossos", "nossas", "demais", "junto",
+    "meio", "geral", "gerais", "novo", "nova", "novos", "novas", "alto", "alta",
+}
+
+
+def _distinctive_phrases(description: str, title: str) -> list[str]:
+    """Expressões distintivas da vaga, priorizando as de duas palavras.
+
+    Uma expressão de duas palavras carrega muito mais informação do que a soma
+    das suas partes: "bem-estar animal" identifica a vaga, "estar" não identifica
+    nada. Por isso os bigramas são avaliados primeiro, e um unigrama só é aceito
+    quando sobrevive a três filtros — não é verbo de anúncio, não é fragmento de
+    palavra composta e não é vocabulário corporativo genérico.
+    """
+    normalized_title = normalize(title)
+    words = [word for word in normalize(description).split() if word not in STOP_WORDS]
+    bigrams = Counter(
+        f"{left} {right}"
+        for left, right in zip(words, words[1:])
+        if len(left) > 3 and len(right) > 3
+        and left not in GENERIC_SKILL_TOKENS and right not in GENERIC_SKILL_TOKENS
+        and left not in JOB_POSTING_VERBS and right not in JOB_POSTING_VERBS
+        and left not in WORD_FRAGMENTS and right not in WORD_FRAGMENTS
+    )
+    unigrams = Counter(tokens(description))
+
+    chosen: list[str] = []
+    # Um bigrama entra se o léxico o reconhece (é vocabulário de mercado) ou se
+    # ele se repete na descrição (o redator o tratou como termo, não como acaso).
+    for phrase, count in bigrams.most_common(40):
+        if groups_for_term(phrase) or count >= 2:
+            chosen.append(phrase)
+        if len(chosen) >= 8:
+            break
+    for token, count in unigrams.most_common(30):
+        if len(chosen) >= 12:
+            break
+        if (
+            len(token) >= 4
+            and not token.isdigit()
+            and token not in GENERIC_SKILL_TOKENS
+            and token not in JOB_POSTING_VERBS
+            and token not in WORD_FRAGMENTS
+            and not any(token in phrase.split() for phrase in chosen)
+            # Reconhecido pelo léxico, presente no título, ou repetido: qualquer
+            # uma das três provas que o termo pertence à vaga, e não ao ruído.
+            and (groups_for_term(token) or phrase_in(normalized_title, token) or count >= 2)
+        ):
+            chosen.append(token)
+    return chosen
+
+
+def detected_skills(description: str, explicit_keywords: Iterable[str] = (), title: str = "") -> list[str]:
     text = normalize(description)
     result = [concept.label for concept in keyword_concepts(explicit_keywords)]
     for canonical, aliases in SKILL_GROUPS.items():
@@ -661,78 +783,181 @@ def detected_skills(description: str, explicit_keywords: Iterable[str] = ()) -> 
             result.append(canonical)
 
     if len(result) < 8:
-        covered_tokens = {
+        covered = {
             token
             for skill in result
             for alias in SKILL_GROUPS.get(skill, (skill,))
             for token in tokens(alias)
         }
-        frequencies = Counter(tokens(description))
-        for token, _ in frequencies.most_common(18):
-            if (
-                len(token) >= 4
-                and not token.isdigit()
-                and token not in GENERIC_SKILL_TOKENS
-                and token not in covered_tokens
-            ):
-                result.append(token.capitalize())
+        for phrase in _distinctive_phrases(description, title):
+            if not any(token in covered for token in phrase.split()):
+                result.append(title_case(phrase))
             if len(unique(result)) >= 10:
                 break
     return unique(result)[:10]
 
 
-def required_concepts_from_description(description: str) -> list[str]:
-    """Extrai requisitos técnicos declarados quando a tela não os separou em chips.
+def job_vocabulary(title: str, description: str, explicit_keywords: Iterable[str] = ()) -> tuple[
+    list[str], list[str], tuple[tuple[str, ...], ...], frozenset[int], frozenset[int]
+]:
+    """Núcleo funcional do cargo e vocabulário distintivo da vaga, em 3 idiomas.
 
-    A interface recebe muitas vagas coladas diretamente da Gupy. Antes, nessa
-    situação, os requisitos ficavam apenas na descrição e o motor retornava
-    ``requiredKeywords=[]``: qualquer Analista de Sistemas recebia nota de
-    candidato aderente mesmo sem SAP, TOTVS ou integrações. Só termos já
-    curados em ``SKILL_GROUPS`` entram automaticamente; texto genérico nunca
-    vira requisito eliminatório.
+    Substitui a família profissional como critério de elegibilidade. A família
+    era uma classificação: precisava conter a carreira do candidato, e o que ela
+    não continha ela julgava errado. Estes dois conjuntos são evidência: são
+    extraídos da própria vaga, cobrem qualquer cargo e degradam suavemente
+    quando o léxico não conhece um termo.
     """
-    text = normalize(description)
-    requirement_markers = (
-        "requisitos", "requisito", "obrigatorio", "obrigatoria",
-        "necessario", "necessaria", "conhecimento em", "conhecimentos em",
-        "experiencia em", "experiencia com", "dominio de",
+    core = [token for token in core_tokens(title) if token not in STOP_WORDS]
+    # Expressões compostas do título contam como uma unidade — "comércio
+    # exterior" não é "comércio" mais "exterior".
+    core_words = normalize(title).split()
+    for size in (3, 2):
+        for start in range(max(0, len(core_words) - size + 1)):
+            phrase = " ".join(core_words[start:start + size])
+            if groups_for_term(phrase):
+                core.append(phrase)
+    # Guarda-chuvas caem fora quando o título traz uma função específica: em
+    # "Business Partner de RH", quem define a função é "business partner". Vale
+    # também quando essa função está fora do léxico e sobrevive só pela grafia.
+    has_specific_literal = any(
+        not groups_for_term(term) and not is_weak_title_noun(term) for term in core
     )
-    if not any(marker in text for marker in requirement_markers):
-        return []
-    found: list[str] = []
-    for label, aliases in SKILL_GROUPS.items():
-        if any(phrase_in(text, alias) for alias in aliases):
-            found.append(label)
-    # Tecnologias de TA/Sistemas que podem não estar na taxonomia geral, mas
-    # cujo nome exato é uma evidência objetiva e verificável no trecho público.
-    for term in (
-        "totvs protheus", "sap successfactors", "successfactors employee central",
-        "employee central", "apis rest", "api rest", "webservices", "xml", "json",
-    ):
-        if phrase_in(text, term):
-            found.append(term)
-    return unique(found)[:8]
+    role_groups = specific_groups(
+        (index for term in core for index in groups_for_term(term)),
+        has_specific_literal=has_specific_literal,
+    )
+    # O núcleo enviado adiante é o das funções que sobreviveram, para que a
+    # camada de busca não gaste consultas com a área guarda-chuva inteira.
+    role_core = lexicon_expand(
+        [term for term in core if not groups_for_term(term) or set(groups_for_term(term)) & role_groups],
+        limit=80,
+    )
+
+    domain_seed = [
+        *(str(keyword) for keyword in explicit_keywords if str(keyword or "").strip()),
+        *_distinctive_phrases(description, title),
+    ]
+    domain_terms = lexicon_expand(domain_seed, limit=140)
+    domain_groups = evidence_groups(
+        {index for term in domain_seed for index in groups_for_term(term)} | groups_in_text(description)
+    )
+    # Conceitos de domínio: os grupos do léxico mais os termos do recrutador que
+    # o léxico não conhece — cada um como um conceito de um único sinônimo.
+    concepts = [SYNONYM_GROUPS[index] for index in sorted(domain_groups)]
+    known = {term for group in concepts for term in group}
+    for term in domain_seed:
+        normalized = normalize(term)
+        if normalized and len(normalized) > 3 and not groups_for_term(term) and normalized not in known:
+            known.add(normalized)
+            concepts.append((normalized,))
+    return role_core, domain_terms, tuple(concepts[:14]), role_groups, domain_groups
+
+
+def _external_list(job: dict[str, Any], field: str) -> list[str]:
+    value = job.get(field)
+    return [str(item) for item in value if str(item or "").strip()] if isinstance(value, list) else []
+
+
+def declared_technical_requirements(description: str) -> list[KeywordConcept]:
+    """Extrai integrações e plataformas declaradas, quando não há chips.
+
+    Requisitos de negócio não viram uma trava automática: apenas tecnologias
+    nomeadas explicitamente na descrição entram nesta camada de evidência.
+    """
+    patterns = (
+        ("totvs protheus", r"\btotvs\s+protheus\b"),
+        ("successfactors employee central", r"\b(?:sap\s+)?successfactors\s+employee\s+central\b"),
+        ("apis rest", r"\b(?:apis?|api)\s+rest\b"),
+        ("webservices", r"\bweb\s*services?\b"),
+        ("xml", r"\bxml\b"),
+        ("json", r"\bjson\b"),
+        ("sql", r"\bsql\b"),
+    )
+    normalized = normalize(description)
+    return [
+        KeywordConcept(label=label, aliases=(label,))
+        for label, pattern in patterns
+        if re.search(pattern, normalized)
+    ]
 
 
 def analyze_job(job: dict[str, Any]) -> JobIntelligence:
     title = str(job.get("title") or "").strip()
     description = str(job.get("description") or "").strip()
     explicit = job.get("keywords") if isinstance(job.get("keywords"), list) else []
-    # Os chips preenchidos pelo recrutador têm prioridade. Para vagas coladas
-    # sem chips, completamos apenas com competências técnicas curadas que estão
-    # explicitamente descritas como requisitos.
-    required_input = [str(item) for item in explicit if str(item).strip()]
-    if not required_input:
-        required_input = required_concepts_from_description(description)
     family = detect_family(title, description)
     level = detect_level(title)
+    role_core, domain_terms, domain_concepts, role_groups, domain_groups = job_vocabulary(
+        title, description, explicit,
+    )
+
+    # VOCABULÁRIO AMPLIADO PELA LEITURA E PELA MEMÓRIA (Onda 2).
+    #
+    # A camada TypeScript já leu a vaga com o modelo e já carregou o que a casa
+    # aprendeu. Esses termos chegam aqui prontos e são SOMADOS ao léxico — o
+    # ranking passa a decidir sobre o mesmo vocabulário que gerou as consultas.
+    # Sem isso, a busca encontraria o perfil em inglês e o ranking o descartaria
+    # por não reconhecer o termo: seria a dupla eliminação de volta, com outro
+    # nome.
+    external_core = _external_list(job, "roleCoreExtra")
+    learned_titles = _external_list(job, "learnedTitles")
+    learned_terms = _external_list(job, "learnedTerms")
+    if external_core:
+        role_core = unique([*role_core, *(normalize(term) for term in external_core)])
+        role_groups = role_groups | frozenset(
+            index for term in external_core for index in groups_for_term(term)
+        )
+    external_concepts = job.get("domainConceptsExtra")
+    if isinstance(external_concepts, list):
+        known_terms = {normalize(term) for group in domain_concepts for term in group}
+        extra_groups: list[tuple[str, ...]] = []
+        for group in external_concepts:
+            if not isinstance(group, list):
+                continue
+            terms = tuple(normalize(term) for term in group if str(term or "").strip())
+            # O vocabulário externo passa pelas MESMAS travas do léxico. Sem
+            # isso, o modelo poderia devolver "bovino" como conceito de domínio
+            # numa vaga de abate e um comprador de gado voltaria a contar como
+            # evidência — a regra de guarda-chuva seria contornada pela porta da
+            # leitura, e a precisão da Onda 1 se perderia em silêncio.
+            group_indexes = {index for term in terms for index in groups_for_term(term)}
+            if group_indexes and not evidence_groups(group_indexes):
+                continue
+            # Um conceito novo só entra se nenhum dos seus termos já pertencer a
+            # um conceito existente: caso contrário "bovino" e "beef" contariam
+            # como duas evidências para o mesmo fato.
+            if terms and not any(term in known_terms for term in terms):
+                known_terms.update(terms)
+                extra_groups.append(terms)
+        domain_concepts = (*domain_concepts, *extra_groups)
+        domain_terms = unique([*domain_terms, *(term for group in extra_groups for term in group)])
+    if learned_terms:
+        # Termos confirmados pelas aprovações do time entram como domínio: é o
+        # vocabulário que a casa provou que identifica um bom candidato.
+        domain_terms = unique([*domain_terms, *(normalize(term) for term in learned_terms)])
     return JobIntelligence(
         family=family,
         family_label=ROLE_FAMILIES[family]["label"] if family else "Função específica",
         level=level,
-        equivalent_titles=tuple(equivalent_titles(title, family, level)),
-        skills=tuple(detected_skills(description, required_input)),
-        required_keywords=tuple(keyword_concepts(required_input)),
+        equivalent_titles=tuple(unique([
+            *equivalent_titles(title, family, level, role_groups),
+            *_external_list(job, "titleVariantsExtra"),
+            *learned_titles,
+        ])[:28]),
+        skills=tuple(detected_skills(description, explicit, title)),
+        # Os chips preenchidos pelo recrutador continuam sendo a fonte
+        # prioritária. Sem eles, apenas tecnologias explicitamente declaradas
+        # na descrição entram como requisito: domínios de negócio não devem
+        # virar uma trava automática de compatibilidade.
+        required_keywords=tuple(
+            keyword_concepts(explicit) if explicit else declared_technical_requirements(description)
+        ),
+        role_core=tuple(role_core),
+        domain_terms=tuple(domain_terms),
+        domain_concepts=domain_concepts,
+        role_groups=role_groups,
+        domain_groups=domain_groups,
     )
 
 
@@ -836,13 +1061,25 @@ def location_alignment(job: dict[str, Any], candidate: dict[str, Any], candidate
     return 0.0, "localidade não confirmada"
 
 
-def evidence_confidence(candidate_text: str) -> tuple[int, str]:
+def evidence_confidence(candidate_text: str, independent_signals: int = 0) -> tuple[int, str]:
+    """Confiança na leitura, e não aderência do candidato.
+
+    Passou a considerar quantos critérios independentes foram confirmados, e não
+    só o tamanho do trecho: um trecho longo cheio de texto institucional não é
+    mais confiável do que um trecho curto que confirma função, domínio e
+    senioridade.
+    """
     length = len(tokens(candidate_text))
+    score = 30
     if length >= 35:
-        return 90, "alta"
-    if length >= 16:
-        return 70, "média"
-    return 45, "baixa"
+        score += 30
+    elif length >= 16:
+        score += 18
+    else:
+        score += 6
+    score += min(4, independent_signals) * 10
+    score = min(98, score)
+    return score, "alta" if score >= 80 else "média" if score >= 60 else "baixa"
 
 
 def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate: dict[str, Any]) -> dict[str, Any]:
@@ -858,53 +1095,103 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         (cosine_similarity(variant, title) for variant in intelligence.equivalent_titles),
         default=0.0,
     )
-    # Semelhança do NÚCLEO funcional do título, sem termos de hierarquia. É esta
-    # medida — e não a semelhança bruta — que decide as exceções de elegibilidade.
+    # Semelhança do NÚCLEO funcional, sem termos de hierarquia.
+    #
+    # A comparação de ELEGIBILIDADE usa apenas o título da vaga e o núcleo
+    # traduzido pelo léxico — nunca a lista ampla de títulos equivalentes. A
+    # lista ampla existe para AMPLIAR a busca e contém títulos de mercado com
+    # funções agregadas: "Senior Compensation Benefits and Payroll Manager" é um
+    # título real, mas a palavra "payroll" dentro dele deixava entrar um gerente
+    # de folha de pagamento numa vaga de Total Rewards. Ampliar a busca e
+    # decidir quem entra na lista são decisões diferentes e passam a usar
+    # conjuntos diferentes.
+    eligibility_titles = (str(job.get("title") or ""), *intelligence.role_core[:24])
     best_core_similarity = max(
-        (core_similarity(variant, title) for variant in intelligence.equivalent_titles),
+        (core_similarity(variant, title) for variant in eligibility_titles if variant),
         default=0.0,
     )
     evidence_tokens = len(tokens(candidate_text))
 
-    # Elegibilidade vem antes da pontuação. Um algoritmo de seleção não pode
-    # transformar localização ou palavras corporativas genéricas em aderência
-    # quando cargo/família e senioridade são incompatíveis.
+    # ------------------------------------------------------------------ #
+    # ELEGIBILIDADE POR EVIDÊNCIA, NÃO POR TAXONOMIA
     #
-    # CORREÇÃO DA DUPLA ELIMINAÇÃO. A camada TypeScript já reprovou quem não tem
-    # cargo, senioridade, critérios obrigatórios e geografia compatíveis. O
-    # motor Python reprovava de novo, com uma taxonomia diferente e uma regra
-    # rígida demais: `candidate_family == intelligence.family`. Como o trecho
-    # público do Google tem cerca de 160 caracteres, `detect_family` devolve
-    # None para a maior parte dos perfis — e ausência de evidência virava
-    # reprovação. Duas listas de aprovados diferentes eliminando uma à outra é
-    # a causa direta das buscas que terminavam em zero perfil.
+    # A regra anterior era `candidate_family == intelligence.family`, com
+    # exceções. Ela tinha um defeito que a medição expôs: o comportamento se
+    # invertia conforme a família fosse ou não reconhecida. Numa vaga de
+    # Supervisor de Abate — família "Produção" — o Slaughter Supervisor era
+    # reprovado por "família divergente (Qualidade)", porque o trecho público
+    # continha a palavra HACCP. Numa vaga de Meio Ambiente, que a taxonomia não
+    # cobre, o filtro deixava de filtrar e aprovava até um trader de carnes.
     #
-    # Agora: família desconhecida NÃO elimina (reduz a nota e a confiança);
-    # família divergente elimina apenas quando o título também não sustenta a
-    # candidatura.
-    family_conflict = bool(
-        intelligence.family
-        and candidate_family
-        and candidate_family != intelligence.family
+    # A regra nova não classifica ninguém. Ela pergunta se existe evidência
+    # pública ligando o perfil à vaga, usando o vocabulário extraído da própria
+    # vaga e traduzido pelo léxico:
+    #
+    #   1. o perfil exerce a MESMA FUNÇÃO (núcleo do cargo, em qualquer idioma)?
+    #   2. ou o perfil demonstra o DOMÍNIO da vaga (dois ou mais termos
+    #      distintivos)?
+    #
+    # Uma das duas basta para seguir. Nenhuma das duas reprova. Exigir dois
+    # termos de domínio, e não um, é deliberado: um único termo adjacente
+    # ("auditoria" aparece em qualidade e em controladoria) não deve carregar
+    # um perfil de outra carreira para dentro da lista.
+    #
+    # A família profissional continua sendo calculada, mas passou a ser apenas
+    # sinal de confiança na explicação. Ela não reprova mais ninguém.
+    # ------------------------------------------------------------------ #
+    candidate_groups = groups_in_text(candidate_text)
+    candidate_title_groups = groups_in_text(title)
+    role_group_hits = intelligence.role_groups & candidate_title_groups
+    role_group_hits_text = intelligence.role_groups & candidate_groups
+    domain_group_hits = intelligence.domain_groups & candidate_groups
+
+    normalized_candidate = normalize(candidate_text)
+    normalized_title = normalize(title)
+    # Termos fora do léxico continuam valendo pela grafia — a cobertura
+    # incompleta do dicionário reduz o alcance da tradução, nunca elimina o
+    # termo informado pelo recrutador.
+    # Termos literais fracos ("trabalho", "geral", "planta") não provam função:
+    # eles casam com metade do mercado. Fora do léxico, só um termo distintivo
+    # do título vale como evidência funcional.
+    literal_role_hits = [
+        term for term in intelligence.role_core[:40]
+        if not is_weak_title_noun(term) and phrase_in(normalized_title, term)
+    ]
+    literal_domain_hits = [
+        term for term in intelligence.domain_terms[:60]
+        if len(term) > 3 and phrase_in(normalized_candidate, term)
+    ]
+
+    weak_function_evidence = bool(role_group_hits_text) or best_core_similarity >= 0.2
+    function_evidence = (
+        bool(role_group_hits or literal_role_hits)
+        or best_core_similarity >= 0.34
+        # Título genérico com a função no corpo do trecho: um "Supervisor de
+        # Produção" cujo perfil diz "abate bovino, rendimento de carcaça"
+        # exerce a função da vaga. Exigir também confirmação de domínio impede
+        # que uma menção solta à palavra sirva de passaporte.
+        or (bool(role_group_hits_text) and len(domain_group_hits) >= 2)
     )
-    # Família divergente só é absolvida com DUAS evidências simultâneas: núcleo
-    # de título em comum e ao menos um sinal técnico da família da vaga no
-    # trecho público. Uma só delas não basta — "Payroll Manager" compartilha o
-    # núcleo "payroll" com um título de Total Rewards, e um gerente de RH
-    # compartilha "recursos humanos" com um Business Partner. A exigência dupla
-    # cobre o erro de classificação sem reabrir a porta para a carreira errada.
-    family_signals = ROLE_FAMILIES[intelligence.family].get("signals", ()) if intelligence.family else ()
-    family_signal_evidence = any(phrase_in(candidate_text, signal) for signal in family_signals)
-    family_eligible = not (
-        family_conflict and not (best_core_similarity >= 0.5 and family_signal_evidence)
+    domain_evidence_count = len(domain_group_hits) + len(
+        [term for term in literal_domain_hits if not any(
+            term in SYNONYM_GROUPS[index] for index in domain_group_hits
+        )]
+    )
+    domain_evidence = domain_evidence_count >= 2
+    # Domínio forte (três ou mais termos) sustenta sozinho um profissional que
+    # usa outro nome de cargo para a mesma função — o caso clássico do bom
+    # candidato com título atípico. Domínio fraco precisa de apoio no título.
+    function_eligible = (
+        function_evidence
+        or domain_evidence_count >= 3
+        or (domain_evidence and weak_function_evidence)
+    )
+
+    family_conflict = bool(
+        intelligence.family and candidate_family and candidate_family != intelligence.family
     )
     family_unconfirmed = bool(intelligence.family and not candidate_family)
-    if family_unconfirmed and best_core_similarity < 0.2:
-        # Sem família e sem núcleo de título em comum não há evidência alguma de
-        # aderência: seguir adiante seria completar a lista com desconhecidos.
-        family_eligible = False
-        family_unconfirmed = False
-        family_conflict = True
+    family_eligible = function_eligible
 
     seniority_distance: int | None = None
     seniority_eligible = True
@@ -919,29 +1206,47 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             # "a confirmar" em vez de ser descartado.
             seniority_eligible = evidence_tokens < 12
     eligible = family_eligible and seniority_eligible
-    if intelligence.family and candidate_family == intelligence.family:
-        # Estar na mesma família profissional é um bom sinal, mas não prova
-        # aderência ao cargo: um Analista e um Diretor pertencem à mesma
-        # família. A nota cheia exige também semelhança real de título.
-        role_score = min(45.0, 26.0 + best_title_similarity * 19.0)
+
+    # A nota do cargo passa a refletir a evidência efetivamente encontrada, e
+    # não o pertencimento a uma família. Um perfil que exerce a função recebe
+    # nota alta mesmo que a taxonomia o tenha classificado noutro lugar; um
+    # perfil que só demonstra o domínio entra com nota de expansão, que é o que
+    # ele é.
+    matched_function = ", ".join(
+        sorted({group_label(index) for index in (role_group_hits or role_group_hits_text)})
+    ) or ", ".join(literal_role_hits[:2])
+    matched_domain = ", ".join(sorted({group_label(index) for index in domain_group_hits})[:3])
+
+    if function_evidence:
+        role_score = min(45.0, 28.0 + best_core_similarity * 17.0)
         title_alignment = (
-            f"cargo equivalente em {intelligence.family_label}"
-            if best_title_similarity >= 0.45
-            else f"mesma família ({intelligence.family_label}), título divergente"
+            f"exerce a função da vaga: {matched_function}"
+            if matched_function
+            else "título equivalente ao da vaga"
         )
-    elif family_unconfirmed:
-        # Família não confirmada no trecho público. O título continua sendo a
-        # evidência disponível e recebe crédito parcial — em vez de a ausência
-        # de informação ser tratada como prova de incompatibilidade.
-        role_score = min(38.0, 14.0 + best_title_similarity * 30.0)
+    elif weak_function_evidence and domain_evidence:
+        role_score = min(34.0, 18.0 + best_core_similarity * 16.0)
         title_alignment = (
-            f"título compatível; família ({intelligence.family_label}) a confirmar no perfil"
-            if best_title_similarity >= 0.4
-            else "família e título não confirmados no trecho público"
+            f"função próxima, domínio confirmado: {matched_domain}"
+            if matched_domain
+            else "função próxima; domínio confirmado no trecho público"
+        )
+    elif domain_evidence_count >= 3:
+        role_score = min(28.0, 12.0 + min(domain_evidence_count, 6) * 2.5)
+        title_alignment = (
+            f"cargo com outro nome; domínio da vaga confirmado: {matched_domain}"
+            if matched_domain
+            else "cargo com outro nome; domínio da vaga confirmado"
         )
     else:
-        role_score = min(34.0, best_title_similarity * 42.0)
-        title_alignment = "cargo parcialmente relacionado" if role_score >= 18 else "cargo pouco relacionado"
+        role_score = min(22.0, best_core_similarity * 30.0)
+        title_alignment = "aderência funcional a confirmar no perfil completo"
+    if family_conflict and role_score > 30.0:
+        # A família divergente não reprova mais, mas continua sendo um alerta:
+        # ela desconta a nota e aparece no motivo, para que o recrutador saiba
+        # onde olhar antes de abordar.
+        role_score -= 4.0
+        title_alignment += f" (classificação alternativa: {ROLE_FAMILIES[candidate_family]['label']})"
 
     matches = skill_matches(intelligence.skills, candidate_text)
     matched_required, missing_required = keyword_evidence(intelligence.required_keywords, candidate_text)
@@ -963,8 +1268,77 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         100.0,
         role_score + skill_score + seniority_score + location_score + segment_score - noise_penalty,
     )))
-    compatibility = base_compatibility
-    confidence, confidence_label = evidence_confidence(candidate_text)
+
+    # TRAVA DE PRECISÃO NO TOPO DA LISTA.
+    #
+    # Um perfil pode acertar tudo o que se vê dele e ainda assim ser um perfil
+    # sobre o qual quase nada se vê. Sem esta trava, o trecho público mais curto
+    # tende a produzir a nota mais alta, porque ausência de informação nunca
+    # contradiz nada — e o topo da lista passa a ser ocupado por quem tem menos
+    # evidência, não por quem tem mais aderência.
+    #
+    # A nota é então multiplicada pela quantidade de sinais INDEPENDENTES
+    # efetivamente confirmados. Quem tem um só sinal não chega ao topo, mesmo
+    # que esse sinal esteja correto.
+    independent_signals = sum((
+        bool(function_evidence),
+        bool(domain_evidence),
+        bool(candidate_level and seniority_distance is not None and seniority_distance <= 1),
+        bool(location_score >= 6.0),
+        bool(matches),
+        bool(matched_required),
+    ))
+    confidence_factor = 0.70 + 0.075 * min(4, independent_signals)
+    compatibility = round(base_compatibility * confidence_factor)
+    confidence, confidence_label = evidence_confidence(candidate_text, independent_signals)
+
+    # ------------------------------------------------------------------ #
+    # AJUSTE PELA MEMÓRIA DA VAGA
+    #
+    # O ajuste precisa acontecer AQUI, e não só na camada TypeScript. Quem
+    # escreve a nota final da lista é este motor: um bônus calculado lá seria
+    # simplesmente sobrescrito na reavaliação, e o aprendizado do time não
+    # apareceria em lugar nenhum. É a mesma classe de erro que fazia os dois
+    # motores se anularem antes da Onda 1 — por isso o cálculo mora onde a nota
+    # é decidida.
+    #
+    # Duas travas preservam o critério de precisão:
+    # 1. A memória só MOVE quem já é elegível; ela nunca torna elegível quem as
+    #    regras reprovaram.
+    # 2. O rebaixamento é limitado. Um título já descartado perde pontos e
+    #    continua visível — uma decisão pontual não apaga um perfil para sempre.
+    # ------------------------------------------------------------------ #
+    learned_titles = [str(item) for item in (job.get("learnedTitles") or []) if str(item or "").strip()]
+    learned_terms = [str(item) for item in (job.get("learnedTerms") or []) if str(item or "").strip()]
+    learned_companies = [str(item) for item in (job.get("learnedCompanies") or []) if str(item or "").strip()]
+    demoted_titles = [str(item) for item in (job.get("demotedTitles") or []) if str(item or "").strip()]
+
+    learned_title_hit = next((item for item in learned_titles if phrase_in(normalized_title, item)), "")
+    learned_term_hits = [item for item in learned_terms if len(item) > 3 and phrase_in(normalized_candidate, item)]
+    learned_company_hit = next(
+        (item for item in learned_companies if len(item) > 2 and phrase_in(normalized_candidate, item)), ""
+    )
+    demoted_hit = next((item for item in demoted_titles if phrase_in(normalized_title, item)), "")
+
+    memory_bonus = min(
+        12,
+        (6 if learned_title_hit else 0)
+        + min(4, len(learned_term_hits) * 2)
+        + (3 if learned_company_hit else 0),
+    )
+    memory_penalty = 10 if demoted_hit else 0
+    memory_notes: list[str] = []
+    if learned_title_hit:
+        memory_notes.append(f"cargo já aprovado pelo time: {learned_title_hit}")
+    if learned_term_hits:
+        memory_notes.append(f"termos do histórico: {', '.join(learned_term_hits[:3])}")
+    if learned_company_hit:
+        memory_notes.append(f"empresa de origem recorrente: {learned_company_hit}")
+    if demoted_hit:
+        memory_notes.append(f"atenção: cargo já descartado antes nesta vaga ({demoted_hit})")
+    memory_delta = memory_bonus - memory_penalty
+    if eligible and memory_delta:
+        compatibility = max(0, min(100, compatibility + memory_delta))
 
     missing = [skill for skill in intelligence.skills if skill not in matches][:5]
     reasons = [
@@ -981,6 +1355,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
         reasons.append(f"empresa do segmento: {matched_company}" if matched_company else "segmento direcionado; empresa a confirmar")
     if noise_penalty:
         reasons.append("trecho público com possível ruído de busca")
+    reasons.extend(memory_notes)
     ranked = dict(candidate)
     default_tier = "A" if not missing_required else ("B" if matched_required else "C")
     supplied_tier = str(candidate.get("tier") or "")
@@ -1001,16 +1376,22 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     ranked.update({
         "eligible": eligible,
         "eligibilityReason": (
-            f"família profissional divergente ({ROLE_FAMILIES[candidate_family]['label']}) sem sustentação no título"
-            if not family_eligible and candidate_family else
-            "família profissional incompatível"
-            if not family_eligible else
+            "sem evidência pública da função nem do domínio da vaga"
+            if not function_eligible else
             "senioridade incompatível com a vaga"
             if not seniority_eligible else
-            "família a confirmar no perfil; título e senioridade compatíveis"
-            if family_unconfirmed else
-            "família profissional e senioridade compatíveis"
+            f"função confirmada ({matched_function}) e senioridade compatível"
+            if function_evidence and matched_function else
+            "função e senioridade compatíveis"
+            if function_evidence else
+            f"domínio da vaga confirmado ({matched_domain}); função a validar no perfil"
+            if matched_domain else
+            "domínio da vaga confirmado; função a validar no perfil"
         ),
+        "evidenceSignals": independent_signals,
+        "memoryNotes": memory_notes,
+        "functionEvidence": sorted({group_label(index) for index in (role_group_hits or role_group_hits_text)}),
+        "domainEvidence": sorted({group_label(index) for index in domain_group_hits})[:6],
         "tier": tier,
         "tierLabel": tier_label,
         "compatibility": compatibility,
@@ -1031,6 +1412,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             "ruido": -round(noise_penalty),
             "evidencia": compatibility - base_compatibility,
             "segmento": round(segment_score),
+            "memoria": memory_delta,
         },
     })
     return ranked
@@ -1093,5 +1475,22 @@ def intelligence_payload(intelligence: JobIntelligence) -> dict[str, Any]:
             {"label": concept.label, "aliases": list(concept.aliases)}
             for concept in intelligence.required_keywords
         ],
+        # Enviados à camada TypeScript para que os dois motores julguem sobre o
+        # MESMO vocabulário. Enquanto cada um mantinha a própria lista, um
+        # aprovava o que o outro reprovava.
+        "roleCore": list(intelligence.role_core),
+        "domainTerms": list(intelligence.domain_terms),
+        # Domínio agrupado por CONCEITO, não por termo. A camada TypeScript
+        # precisa contar quantos conceitos distintos o perfil confirma; uma
+        # lista plana faria "bovino" e "beef" contarem como duas evidências
+        # quando são a mesma.
+        "domainConcepts": [list(group) for group in intelligence.domain_concepts],
+        # Termos de hierarquia da vaga nos três idiomas. A camada de busca os
+        # combina com o núcleo funcional numa consulta só, em vez de tentar
+        # adivinhar a ordem das palavras do título em cada idioma.
+        "levelTerms": (
+            [term for language in ("pt", "en", "es") for term in LEVELS[intelligence.level][language]]
+            if intelligence.level else []
+        ),
         "languages": ["pt", "en", "es"],
     }
