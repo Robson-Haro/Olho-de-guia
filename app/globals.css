@@ -155,17 +155,3 @@ header{gap:16px;flex-wrap:wrap}
 .genderTag{display:inline-block;margin-top:7px;padding:3px 8px;border-radius:20px;font-size:9px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:#e6d4ff;background:#3a1568;border:1px solid #a970ff4d}
 .genderTag.masculino{color:#cfe6ff;background:#0d3358;border-color:#4da2ff4d}
 @media(max-width:720px){.genderKeyControls{grid-template-columns:1fr}}
-
-/* Avaliação interna do Kairós */
-.kairosView{display:grid;gap:18px;max-width:1050px}
-.kairosHero,.kairosCandidate{border-radius:20px;padding:26px}
-.kairosHero{display:flex;align-items:center;justify-content:space-between;gap:20px;background:radial-gradient(circle at 85% 5%,#0c82c955,transparent 38%),linear-gradient(135deg,#ffffff12,#06182b)}
-.kairosHero h2{margin:5px 0 8px;font-size:26px}.kairosHero p,.kairosCandidate p{margin:0;color:#9eb7ca}
-.kairosCount,.kairosScore{display:grid;text-align:center;gap:2px;border:1px solid #55d7ff55;border-radius:16px;padding:14px 20px;background:#08395888;min-width:130px}
-.kairosCount strong,.kairosScore strong{color:#8ee4ff;font-size:30px;line-height:1}.kairosCount span,.kairosScore span{color:#9bc4d9;font-size:9px;font-weight:900;letter-spacing:1px}
-.kairosCandidate{display:grid;gap:22px}.kairosCandidateHead{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:15px}.kairosCandidateHead h3{margin:5px 0;font-size:22px}.kairosCandidateHead .avatar{width:54px;height:54px;font-size:16px}
-.kairosScore{border-color:#4cdf9c55;background:#0b493c77}.kairosScore strong{color:#8df0c2}
-.kairosMetrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.kairosMetrics span{display:flex;justify-content:space-between;gap:8px;padding:12px;border:1px solid #5acfff25;border-radius:10px;background:#071b2d;color:#a7c0d2;font-size:12px}.kairosMetrics b{color:#fff}
-.kairosAnalysis{display:grid;gap:9px;padding-top:6px;border-top:1px solid #ffffff18}.kairosAnalysis p{line-height:1.5}.kairosAnalysis strong{color:#dff5ff}
-.kairosNoMore{display:flex;align-items:center;gap:12px;border:1px solid #47db9b55;border-radius:14px;padding:17px 19px;color:#9df2c9;background:#0d553c44}.kairosNoMore div{display:grid;gap:3px}.kairosNoMore span{color:#c7e5d6;font-size:13px}
-@media(max-width:720px){.kairosHero,.kairosCandidateHead{align-items:flex-start;flex-direction:column;display:flex}.kairosMetrics{grid-template-columns:1fr}.kairosCount,.kairosScore{min-width:0;width:100%}}
