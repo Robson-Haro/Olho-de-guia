@@ -516,3 +516,189 @@ class EngineRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrecisionFirstTests(unittest.TestCase):
+    """Regressões da rodada 'precisão em primeiro lugar'.
+
+    Cada caso aqui foi MEDIDO como quebrado antes da correção: a taxonomia fixa
+    de 19 famílias invertia o comportamento do filtro conforme a família fosse
+    ou não reconhecida.
+    """
+
+    ABATE = {
+        "title": "Supervisor de Abate",
+        "description": (
+            "Supervisionar a linha de abate bovino, garantir bem-estar animal, "
+            "rendimento de carcaça e conformidade com o SIF."
+        ),
+        "keywords": [],
+        "cities": ["Barretos"],
+        "subdivision": "São Paulo",
+        "country": "Brasil",
+    }
+
+    def test_cargo_fora_da_taxonomia_gera_titulos_nos_tres_idiomas(self):
+        # Antes: fora das 19 famílias cadastradas o motor devolvia apenas o
+        # título digitado, e a busca em inglês e espanhol não acontecia.
+        intelligence = analyze_job(self.ABATE)
+        self.assertIn("Slaughter", intelligence.equivalent_titles)
+        self.assertIn("slaughter", intelligence.role_core)
+        self.assertIn("faena", intelligence.role_core)
+
+    def test_equivalente_em_ingles_e_aprovado_e_outra_carreira_reprovada(self):
+        candidates = [
+            {"name": "Slaughter", "title": "Slaughter Supervisor",
+             "summary": "Slaughter Supervisor at Marfrig · Beef processing, animal welfare, HACCP."},
+            {"name": "Trader", "title": "Trader de Carnes",
+             "summary": "Trader de Carnes · Exportação de proteína bovina para Ásia e MENA."},
+            {"name": "Ambiental", "title": "Coordenadora de Meio Ambiente",
+             "summary": "Licenciamento ambiental, efluentes e outorga."},
+        ]
+        _, ranked, _ = rank_candidates(self.ABATE, candidates)
+        self.assertEqual(["Slaughter"], [item["name"] for item in ranked])
+
+    def test_vaga_sem_familia_reconhecida_nao_afrouxa_o_filtro(self):
+        # Antes: sem família, o filtro deixava de filtrar e aprovava 7 de 10
+        # perfis — inclusive de carreiras opostas.
+        job = {
+            "title": "Coordenador de Meio Ambiente",
+            "description": "Licenciamento ambiental, efluentes, resíduos, outorga de água e auditorias ambientais.",
+            "keywords": [], "cities": ["Barretos"], "subdivision": "São Paulo", "country": "Brasil",
+        }
+        candidates = [
+            {"name": "Ambiental", "title": "Coordenadora de Meio Ambiente",
+             "summary": "Licenciamento ambiental, efluentes e outorga."},
+            {"name": "Trader", "title": "Trader de Carnes",
+             "summary": "Exportação de proteína bovina para Ásia e MENA."},
+            {"name": "Veterinária", "title": "Veterinária Responsável Técnica",
+             "summary": "Responsável Técnica, inspeção sanitária e bem-estar animal."},
+            {"name": "Manutenção", "title": "Gerente de Manutenção",
+             "summary": "Amônia, utilidades, manutenção preditiva em planta frigorífica."},
+        ]
+        _, ranked, _ = rank_candidates(job, candidates)
+        self.assertEqual(["Ambiental"], [item["name"] for item in ranked])
+
+    def test_area_guarda_chuva_no_titulo_nao_define_a_funcao(self):
+        # "Business Partner de RH": a função é business partner, e "RH" é apenas
+        # o contexto. Sem essa distinção, qualquer gerente de RH era lido como
+        # exercendo a mesma função.
+        intelligence = analyze_job({
+            "title": "Business Partner de RH",
+            "description": "Parceria estratégica com o negócio, apoio às lideranças, pessoas e cultura.",
+            "keywords": [], "cities": ["Barretos"], "country": "Brasil",
+        })
+        self.assertIn("hrbp", intelligence.role_core)
+        self.assertNotIn("recursos humanos", intelligence.role_core)
+
+    def test_competencias_nao_trazem_fragmentos_nem_verbos_de_anuncio(self):
+        # Antes: "Estar" (metade de "bem-estar"), "Supervisionar" e "Linha"
+        # eram tratados como competências e cobrados do candidato.
+        intelligence = analyze_job(self.ABATE)
+        proibidos = {"Estar", "Linha", "Supervisionar", "Garantir", "Conformidade Com"}
+        self.assertFalse(
+            proibidos & set(intelligence.skills),
+            f"competências espúrias encontradas: {proibidos & set(intelligence.skills)}",
+        )
+        self.assertIn("Abate", intelligence.skills)
+
+    def test_perfil_com_poucos_sinais_nao_supera_perfil_completo(self):
+        candidates = [
+            {"name": "Magro", "title": "Supervisor de Abate", "summary": ""},
+            {"name": "Completo", "title": "Supervisor de Abate",
+             "summary": "Abate bovino, bem-estar animal, rendimento de carcaça e SIF em Barretos, São Paulo.",
+             "geographicMatch": "city"},
+        ]
+        _, ranked, _ = rank_candidates(self.ABATE, candidates)
+        notas = {item["name"]: item["compatibility"] for item in ranked}
+        self.assertGreater(notas.get("Completo", 0), notas.get("Magro", 0))
+
+
+class ReadingAndMemoryTests(unittest.TestCase):
+    """Regressões da Onda 2 — leitura por modelo e memória de vagas."""
+
+    JOB = {
+        "title": "Supervisor de Abate",
+        "description": "Supervisionar a linha de abate bovino, bem-estar animal e rendimento de carcaça.",
+        "keywords": [],
+        "cities": ["Barretos"],
+        "subdivision": "São Paulo",
+        "country": "Brasil",
+    }
+
+    def test_vocabulario_da_leitura_soma_ao_lexico(self):
+        intelligence = analyze_job({
+            **self.JOB,
+            "roleCoreExtra": ["desossa", "deboning"],
+            "titleVariantsExtra": ["Beef Slaughter Supervisor"],
+        })
+        # O léxico continua inteiro...
+        self.assertIn("slaughter", intelligence.role_core)
+        # ...e o vocabulário da leitura entra ao lado dele.
+        self.assertIn("desossa", intelligence.role_core)
+        self.assertIn("Beef Slaughter Supervisor", intelligence.equivalent_titles)
+
+    def test_leitura_nao_contorna_a_regra_de_guarda_chuva(self):
+        # Sem esta trava, o modelo poderia devolver "bovino" como conceito de
+        # domínio e um comprador de gado voltaria a contar como evidência.
+        intelligence = analyze_job({
+            **self.JOB,
+            "domainConceptsExtra": [["bovino", "beef"], ["recursos humanos"], ["sif", "inspecao federal"]],
+        })
+        termos = {termo for grupo in intelligence.domain_concepts for termo in grupo}
+        self.assertNotIn("bovino", termos)
+        self.assertNotIn("recursos humanos", termos)
+        self.assertIn("sif", termos)
+
+    def test_memoria_eleva_o_cargo_que_o_time_ja_aprovou(self):
+        perfis = [{
+            "name": "Genérico", "title": "Supervisor de Produção",
+            "summary": "Supervisor de Produção · abate bovino e carcaça.",
+            "geographicMatch": "targeted",
+        }]
+        _, sem, _ = rank_candidates(self.JOB, perfis)
+        _, com, _ = rank_candidates(
+            {**self.JOB, "learnedTitles": ["Supervisor de Produção"], "learnedTerms": ["carcaca"]},
+            perfis,
+        )
+        self.assertGreater(com[0]["compatibility"], sem[0]["compatibility"])
+        self.assertTrue(any("já aprovado pelo time" in nota for nota in com[0]["memoryNotes"]))
+
+    def test_memoria_nunca_torna_elegivel_quem_as_regras_reprovaram(self):
+        # A porta lateral fechada na Onda 1 continua fechada, inclusive para o
+        # aprendizado: o time pode aprovar um trader, mas isso não faz um trader
+        # entrar numa vaga de abate.
+        perfis = [{
+            "name": "Trader", "title": "Trader de Carnes",
+            "summary": "Trader de Carnes · exportação de proteína para a Ásia.",
+            "geographicMatch": "targeted",
+        }]
+        _, aprovados, expansao = rank_candidates(
+            {**self.JOB, "learnedTitles": ["Trader de Carnes"], "learnedTerms": ["exportacao"]},
+            perfis,
+        )
+        self.assertEqual([], [c["name"] for c in aprovados])
+        self.assertEqual(["Trader"], [c["name"] for c in expansao])
+
+    def test_titulo_descartado_rebaixa_mas_continua_na_lista(self):
+        perfis = [{
+            "name": "Direto", "title": "Supervisor de Abate",
+            "summary": "Supervisor de Abate · abate bovino, bem-estar animal e carcaça.",
+            "geographicMatch": "targeted",
+        }]
+        _, sem, _ = rank_candidates(self.JOB, perfis)
+        _, com, _ = rank_candidates({**self.JOB, "demotedTitles": ["Supervisor de Abate"]}, perfis)
+        self.assertLess(com[0]["compatibility"], sem[0]["compatibility"])
+        self.assertEqual(["Direto"], [c["name"] for c in com], "rebaixar não pode eliminar")
+
+    def test_sem_leitura_e_sem_memoria_o_comportamento_e_o_da_onda_1(self):
+        perfis = [{
+            "name": "Direto", "title": "Supervisor de Abate",
+            "summary": "Supervisor de Abate · abate bovino e carcaça.",
+            "geographicMatch": "targeted",
+        }]
+        _, com_campos_vazios, _ = rank_candidates(
+            {**self.JOB, "roleCoreExtra": [], "learnedTitles": [], "demotedTitles": []}, perfis,
+        )
+        _, sem_campos, _ = rank_candidates(self.JOB, perfis)
+        self.assertEqual(sem_campos[0]["compatibility"], com_campos_vazios[0]["compatibility"])

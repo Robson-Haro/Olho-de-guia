@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authorizeAdminWrite, isAdminKeyConfigured } from "@/lib/admin-auth";
 import {
   getTalentSourceStatuses,
   isTalentProvider,
@@ -8,7 +9,13 @@ import {
 
 export async function GET() {
   try {
-    return NextResponse.json({ sources: await getTalentSourceStatuses() });
+    // A leitura de status não expõe credencial: informa apenas se a
+    // integração está ativa. `adminKeyConfigured` permite que a tela avise
+    // quando a senha administrativa ainda não foi definida na Vercel.
+    return NextResponse.json({
+      sources: await getTalentSourceStatuses(),
+      adminKeyConfigured: isAdminKeyConfigured(),
+    });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Erro interno." },
@@ -18,6 +25,10 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const authorized = authorizeAdminWrite(request);
+  if (!authorized.ok) {
+    return NextResponse.json({ error: authorized.error, code: authorized.code }, { status: authorized.status });
+  }
   try {
     const body = await request.json() as { provider?: unknown; apiKey?: unknown; action?: unknown };
     if (!isTalentProvider(body.provider)) {

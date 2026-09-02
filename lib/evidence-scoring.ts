@@ -1,11 +1,13 @@
 export type EvidenceStatus = "confirmed" | "unconfirmed" | "failed";
 
 export type CandidateEvidence = {
-  criterion: "role" | "seniority" | "required" | "leadership" | "complexity" | "geography";
+  criterion: "role" | "seniority" | "required" | "domain" | "leadership" | "geography";
   label: string;
   status: EvidenceStatus;
   score: number;
   maxScore: number;
+  /** Falso quando o critério não pôde ser observado e por isso saiu da conta. */
+  observable: boolean;
   evidence: string;
 };
 
@@ -13,10 +15,18 @@ export type EvidenceAssessmentInput = {
   jobTitle: string;
   /**
    * Títulos equivalentes produzidos pelo motor multilíngue. A vaga pode ser
-   * "Gerente de Produção" e o mercado usar "Production Manager"; comparar
-   * apenas o texto digitado criava falsos negativos antes da reavaliação.
+   * "Gerente de Produção" e o mercado usar "Production Manager".
    */
   roleAlternatives?: string[];
+  /**
+   * Núcleo funcional da vaga já traduzido para os três idiomas pelo léxico do
+   * motor Python. Esta camada NÃO mantém a própria lista de equivalências: era
+   * exatamente a duplicação de vocabulário entre os dois motores que fazia um
+   * aprovar quem o outro reprovava.
+   */
+  roleCore?: string[];
+  /** Conceitos de domínio da vaga, cada um com os seus sinônimos. */
+  domainConcepts?: string[][];
   candidateTitle: string;
   candidateText: string;
   requiredConcepts: Array<{ label: string; aliases: string[] }>;
@@ -27,6 +37,8 @@ export type EvidenceAssessmentInput = {
 export type EvidenceAssessment = {
   eligible: boolean;
   score: number;
+  /** Quantos critérios independentes foram efetivamente confirmados. */
+  confirmedSignals: number;
   classification: "high" | "validate" | "expansion" | "rejected";
   rejectionReasons: string[];
   evidence: CandidateEvidence[];
@@ -46,65 +58,36 @@ const SENIORITY: Array<{ rank: number; terms: string[] }> = [
 const LEADERSHIP_SIGNALS = [
   "lideranca", "liderando", "liderar", "leading", "leadership", "gestao de equipe",
   "team management", "responsavel pela area", "head of", "diretos", "direct reports",
-];
-
-const COMPLEXITY_SIGNALS = [
-  "global", "latam", "america latina", "regional", "multinacional", "multinational",
-  "multiple countries", "varios paises", "executive compensation", "remuneracao executiva",
-  "long term incentive", "lti", "mercer", "korn ferry", "hay group", "job evaluation",
+  "gestao de pessoas", "people management", "lidero", "liderei", "coordenei",
 ];
 
 /**
- * Equivalências de vocabulário funcional entre português, inglês e espanhol.
- * O motor Python já envia títulos equivalentes, mas o mercado combina as
- * palavras em ordens diferentes ("Payroll & Benefits" x "Benefícios e Folha").
- * Este mapa garante que o TERMO seja reconhecido mesmo quando o TÍTULO inteiro
- * não coincide com nenhuma das variantes previstas.
+ * Equivalências de reserva. Usadas SOMENTE quando o motor Python não enviou o
+ * núcleo funcional — por exemplo numa pesquisa salva antes desta versão. Em
+ * operação normal quem manda é o léxico, que cobre qualquer cargo.
  */
-const ROLE_EQUIVALENTS: Record<string, string[]> = {
+const FALLBACK_ROLE_EQUIVALENTS: Record<string, string[]> = {
   remuneracao: ["remuneracao", "compensation", "rewards", "compensacion"],
   beneficios: ["beneficios", "benefits"],
-  total: ["total"],
-  rewards: ["rewards", "remuneracao", "compensation"],
-  compensation: ["compensation", "remuneracao", "rewards"],
-  benefits: ["benefits", "beneficios"],
   recrutamento: ["recrutamento", "recruiting", "recruitment", "reclutamiento", "talent acquisition"],
   selecao: ["selecao", "selection", "seleccion", "staffing"],
-  pessoas: ["pessoas", "people", "personas"],
-  talentos: ["talentos", "talent", "talento"],
   producao: ["producao", "production", "manufacturing", "produccion"],
   manutencao: ["manutencao", "maintenance", "mantenimiento", "reliability"],
   qualidade: ["qualidade", "quality", "calidad"],
-  logistica: ["logistica", "logistics", "supply chain", "cadena de suministro"],
+  logistica: ["logistica", "logistics", "supply chain"],
   suprimentos: ["suprimentos", "procurement", "purchasing", "compras", "sourcing"],
-  compras: ["compras", "procurement", "purchasing", "sourcing"],
   financeiro: ["financeiro", "finance", "financiero", "financial"],
-  controladoria: ["controladoria", "controllership", "controlling", "control de gestion"],
-  contabilidade: ["contabilidade", "accounting", "contabilidad"],
-  fiscal: ["fiscal", "tax", "tributario", "taxation"],
   comercial: ["comercial", "sales", "commercial", "ventas"],
-  vendas: ["vendas", "sales", "ventas"],
-  marketing: ["marketing", "mercadeo"],
   dados: ["dados", "data", "datos", "analytics"],
-  tecnologia: ["tecnologia", "technology", "it", "tecnologia da informacao"],
   processos: ["processos", "process", "procesos"],
-  engenharia: ["engenharia", "engineering", "ingenieria"],
-  seguranca: ["seguranca", "safety", "seguridad"],
-  treinamento: ["treinamento", "training", "capacitacion", "learning"],
-  desenvolvimento: ["desenvolvimento", "development", "desarrollo"],
-  trabalhistas: ["trabalhistas", "labor relations", "employee relations", "laborales"],
-  sindicais: ["sindicais", "union relations", "sindicales", "labor relations"],
   folha: ["folha", "payroll", "nomina"],
-  pagamento: ["pagamento", "payroll", "payment", "nomina"],
-  industrial: ["industrial", "manufacturing", "plant"],
-  planejamento: ["planejamento", "planning", "planificacion"],
-  precificacao: ["precificacao", "pricing", "precios"],
 };
 
 const STOP = new Set([
   "de", "da", "do", "das", "dos", "e", "em", "para", "com", "the", "of", "and",
-  "senior", "senior", "executivo", "executiva", "executive", "gerente", "manager",
-  "head", "diretor", "director",
+  "senior", "junior", "pleno", "executivo", "executiva", "executive",
+  "gerente", "manager", "head", "diretor", "director", "coordenador", "coordinator",
+  "supervisor", "analista", "analyst", "especialista", "specialist",
 ]);
 
 export function normalizeEvidenceText(value: string) {
@@ -112,7 +95,12 @@ export function normalizeEvidenceText(value: string) {
 }
 
 function contains(text: string, term: string) {
-  return normalizeEvidenceText(text).includes(normalizeEvidenceText(term));
+  const haystack = normalizeEvidenceText(text);
+  const needle = normalizeEvidenceText(term).trim();
+  if (!needle) return false;
+  // Limite de palavra dos dois lados: sem isso "ti" é encontrado dentro de
+  // "gestão" e "cto" dentro de "director".
+  return new RegExp(`(?:^|[^a-z0-9])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^a-z0-9])`).test(haystack);
 }
 
 function seniorityRank(value: string) {
@@ -143,152 +131,226 @@ function signalEvidence(text: string, signals: string[]) {
   return signal ? excerpt(text, signal) : "";
 }
 
-export function assessCandidateEvidence(input: EvidenceAssessmentInput): EvidenceAssessment {
-  const candidateText = [input.candidateTitle, input.candidateText].filter(Boolean).join(" · ");
+/**
+ * Aderência funcional. O núcleo enviado pelo léxico decide primeiro: se o
+ * profissional exerce a função em qualquer um dos três idiomas, a cobertura é
+ * cheia. A comparação por palavras do título é o caminho de reserva.
+ */
+function assessRole(input: EvidenceAssessmentInput) {
+  const core = (input.roleCore || []).filter(Boolean);
+  const inTitle = core.find((term) => contains(input.candidateTitle, term));
+  const inText = inTitle ? "" : core.find((term) => contains(input.candidateText, term));
+
   const roleOptions = [...new Set([input.jobTitle, ...(input.roleAlternatives || [])].filter(Boolean))];
-  // O título devolvido pelo Google nem sempre existe: quando o resultado não
-  // traz separador, o parser entrega "Perfil profissional no LinkedIn" e a
-  // aderência funcional caía a zero — eliminando profissionais corretos por
-  // falha de formatação do snippet, não por incompatibilidade. A evidência do
-  // cargo passa a ser buscada também no corpo do trecho público, com peso
-  // menor: confirmar no título continua valendo mais do que citar no texto.
-  const TEXT_EVIDENCE_WEIGHT = 0.6;
-  const roleMatches = roleOptions.map((role) => {
+  let bestTokenCoverage = 0;
+  let bestRole = input.jobTitle;
+  let matchedTokens: string[] = [];
+  for (const role of roleOptions) {
     const tokens = roleTokens(role);
+    if (!tokens.length) continue;
     const matched: string[] = [];
     let weighted = 0;
     for (const token of tokens) {
-      const aliases = ROLE_EQUIVALENTS[token] || [token];
+      const aliases = FALLBACK_ROLE_EQUIVALENTS[token] || [token];
       if (aliases.some((alias) => contains(input.candidateTitle, alias))) {
         matched.push(token);
         weighted += 1;
       } else if (aliases.some((alias) => contains(input.candidateText, alias))) {
         matched.push(token);
-        weighted += TEXT_EVIDENCE_WEIGHT;
+        weighted += 0.6;
       }
     }
-    return { role, tokens, matched, coverage: tokens.length ? weighted / tokens.length : 0 };
-  });
-  const bestRoleMatch = roleMatches.sort((left, right) => right.coverage - left.coverage)[0]
-    || { role: input.jobTitle, tokens: [], matched: [], coverage: 0 };
-  const matchedRoleTokens = bestRoleMatch.matched;
-  const roleCoverage = bestRoleMatch.coverage;
-  const roleScore = Math.round(25 * roleCoverage);
+    const coverage = weighted / tokens.length;
+    if (coverage > bestTokenCoverage) {
+      bestTokenCoverage = coverage;
+      bestRole = role;
+      matchedTokens = matched;
+    }
+  }
+
+  const coverage = Math.max(inTitle ? 1 : inText ? 0.62 : 0, bestTokenCoverage);
+  const evidence = inTitle
+    ? `função no título: ${inTitle}`
+    : inText
+      ? `função no trecho público: ${inText}`
+      : matchedTokens.length
+        ? `termos do cargo: ${matchedTokens.join(", ")}${bestRole !== input.jobTitle ? ` · título equivalente: ${bestRole}` : ""}`
+        : "sem evidência pública do cargo";
+  return { coverage, evidence };
+}
+
+/** Conta CONCEITOS de domínio confirmados, não termos: "bovino" e "beef" são um. */
+function assessDomain(input: EvidenceAssessmentInput) {
+  const concepts = (input.domainConcepts || []).filter((group) => group?.length);
+  if (!concepts.length) return { confirmed: 0, total: 0, evidence: "" };
+  const hits = concepts
+    .map((group) => group.find((term) => term.length > 3 && contains(input.candidateText, term)))
+    .filter((term): term is string => Boolean(term));
+  return {
+    confirmed: hits.length,
+    total: concepts.length,
+    evidence: hits.length ? `domínio confirmado: ${[...new Set(hits)].slice(0, 5).join(", ")}` : "",
+  };
+}
+
+export function assessCandidateEvidence(input: EvidenceAssessmentInput): EvidenceAssessment {
+  const candidateText = [input.candidateTitle, input.candidateText].filter(Boolean).join(" · ");
+  const role = assessRole(input);
+  const domain = assessDomain({ ...input, candidateText });
 
   const jobRank = seniorityRank(input.jobTitle);
   const candidateRank = seniorityRank(input.candidateTitle);
-  const seniorityDistance = jobRank && candidateRank ? Math.abs(jobRank - candidateRank) : 99;
-  const seniorityScore = !jobRank ? 10 : seniorityDistance === 0 ? 20 : seniorityDistance === 1 ? 12 : 0;
+  const seniorityDistance = jobRank && candidateRank ? Math.abs(jobRank - candidateRank) : null;
 
   const requiredMatches = input.requiredConcepts.map((concept) => {
     const alias = concept.aliases.find((item) => contains(candidateText, item));
     return { ...concept, alias, excerpt: alias ? excerpt(candidateText, alias) : "" };
   });
   const requiredConfirmed = requiredMatches.filter((item) => item.alias);
-  const requiredScore = input.requiredConcepts.length
-    ? Math.round(25 * requiredConfirmed.length / input.requiredConcepts.length)
-    : 12;
 
   const leadershipExcerpt = signalEvidence(candidateText, LEADERSHIP_SIGNALS);
-  const leadershipRequired = jobRank >= 6;
-  const leadershipScore = leadershipExcerpt ? 10 : leadershipRequired ? 0 : 5;
-  const complexityExcerpt = signalEvidence(candidateText, COMPLEXITY_SIGNALS);
-  const complexityScore = complexityExcerpt ? 10 : 0;
-  const geographyScore = input.geographicMatch === "city"
-    ? 10
-    : input.geographicMatch === "subdivision"
-      ? 8
-      : input.geographicMatch === "country"
-        ? 5
-        : 0;
+  const leadershipRequired = jobRank >= 5;
+  const explicitlyDivergent = normalizeEvidenceText(input.geographicLabel || "").includes("divergente");
+  const geographyObservable = input.geographicMatch !== "targeted" && input.geographicMatch !== "unknown";
+
+  // ------------------------------------------------------------------ //
+  // NOTA NORMALIZADA PELO QUE É OBSERVÁVEL
+  //
+  // A versão anterior dividia todo candidato por um total fixo de 100 pontos,
+  // dos quais 20 dependiam de sinais que quase nunca aparecem num trecho de
+  // 160 caracteres: escopo global e cidade confirmada. O efeito medido é que
+  // um Supervisor de Abate perfeito chegava no máximo a 62 e nunca saía de
+  // "expansão" — a régua tinha sido calibrada para um cargo executivo global e
+  // aplicada a toda a operação.
+  //
+  // Cada critério agora declara se pôde ser observado NAQUELE perfil. O que não
+  // pôde sai do numerador E do denominador: ausência de evidência deixa de ser
+  // tratada como evidência de ausência. Em troca, a confiança cai — e é a
+  // confiança que impede o perfil magro de subir ao topo.
+  // ------------------------------------------------------------------ //
+  const criteria: CandidateEvidence[] = [
+    {
+      criterion: "role",
+      label: "Aderência funcional",
+      status: role.coverage >= 0.75 ? "confirmed" : role.coverage >= 0.34 ? "unconfirmed" : "failed",
+      score: Math.round(30 * role.coverage),
+      maxScore: 30,
+      observable: true,
+      evidence: role.evidence,
+    },
+    {
+      criterion: "seniority",
+      label: "Senioridade atual",
+      status: seniorityDistance === 0 ? "confirmed" : seniorityDistance === 1 ? "unconfirmed" : candidateRank ? "failed" : "unconfirmed",
+      score: seniorityDistance === 0 ? 20 : seniorityDistance === 1 ? 12 : 0,
+      maxScore: 20,
+      // Sem nível visível no trecho, o critério não é observável. Antes, isso
+      // era pontuado como zero e derrubava a nota de quem só tinha um título
+      // curto no índice do Google.
+      observable: Boolean(jobRank && candidateRank),
+      evidence: candidateRank ? input.candidateTitle : "senioridade não visível no trecho público",
+    },
+    {
+      criterion: "required",
+      label: "Critérios obrigatórios",
+      status: !input.requiredConcepts.length || requiredConfirmed.length === input.requiredConcepts.length
+        ? "confirmed"
+        : requiredConfirmed.length ? "unconfirmed" : "failed",
+      score: input.requiredConcepts.length
+        ? Math.round(25 * requiredConfirmed.length / input.requiredConcepts.length)
+        : 0,
+      maxScore: 25,
+      observable: input.requiredConcepts.length > 0,
+      evidence: input.requiredConcepts.length
+        ? requiredMatches.map((item) => item.alias
+          ? `${item.label}: ${item.excerpt || item.alias}`
+          : `${item.label}: não confirmado no trecho público`).join(" | ")
+        : "nenhum critério obrigatório informado",
+    },
+    {
+      criterion: "domain",
+      label: "Domínio da vaga",
+      status: domain.confirmed >= 2 ? "confirmed" : domain.confirmed ? "unconfirmed" : "failed",
+      // Dois conceitos já valem a nota cheia: exigir que um trecho de 160
+      // caracteres repita o vocabulário inteiro da vaga é exigir o impossível.
+      score: Math.round(20 * Math.min(1, domain.confirmed / 2)),
+      maxScore: 20,
+      observable: domain.total > 0,
+      evidence: domain.evidence || "domínio da vaga não confirmado no trecho público",
+    },
+    {
+      criterion: "leadership",
+      label: "Liderança da função",
+      status: leadershipExcerpt ? "confirmed" : "unconfirmed",
+      score: leadershipExcerpt ? 10 : 0,
+      maxScore: 10,
+      // Só entra na conta quando a vaga é de liderança. Numa vaga de analista,
+      // cobrar evidência de liderança penalizava o candidato certo.
+      observable: leadershipRequired,
+      evidence: leadershipExcerpt || "liderança não confirmada no trecho público",
+    },
+    {
+      criterion: "geography",
+      label: "Localização atual",
+      status: explicitlyDivergent
+        ? "failed"
+        : input.geographicMatch === "city" || input.geographicMatch === "subdivision"
+          ? "confirmed"
+          : "unconfirmed",
+      score: input.geographicMatch === "city" ? 15 : input.geographicMatch === "subdivision" ? 12 : input.geographicMatch === "country" ? 8 : 0,
+      maxScore: 15,
+      // Cerca de quatro em cada cinco trechos do LinkedIn não trazem
+      // localização estruturada. Punir isso é punir o índice do Google, não o
+      // candidato — a consulta já foi direcionada à região pedida.
+      observable: geographyObservable,
+      evidence: input.geographicLabel || "localização não confirmada",
+    },
+  ];
+
+  const observable = criteria.filter((item) => item.observable);
+  const obtained = observable.reduce((total, item) => total + item.score, 0);
+  const available = observable.reduce((total, item) => total + item.maxScore, 0);
+  const normalized = available ? (obtained / available) * 100 : 0;
+
+  // TRAVA DE PRECISÃO. Normalizar sozinho tem um efeito perverso: quanto menos
+  // se vê de um perfil, menos critérios entram no denominador e mais fácil fica
+  // acertar todos. Sem esta trava, o topo da lista passaria a ser ocupado por
+  // quem tem menos informação pública. O fator de confiança corrige isso: quem
+  // confirma um único critério não alcança o topo, ainda que o acerte.
+  const confirmedSignals = criteria.filter((item) => item.status === "confirmed" && item.observable).length;
+  const confidenceFactor = 0.70 + 0.075 * Math.min(4, confirmedSignals);
+  const score = Math.round(Math.max(0, Math.min(100, normalized * confidenceFactor)));
 
   const rejectionReasons: string[] = [];
-  if (roleCoverage < 0.5) rejectionReasons.push("cargo funcional incompatível com a vaga");
-  if (jobRank >= 6 && candidateRank > 0 && candidateRank < 6) {
-    rejectionReasons.push("senioridade atual abaixo de gerente/head");
+  // Elegibilidade pela MESMA regra do motor Python: exerce a função, ou
+  // demonstra o domínio. Nenhum dos dois, e o perfil não entra.
+  if (role.coverage < 0.34 && domain.confirmed < 2) {
+    rejectionReasons.push("sem evidência pública da função nem do domínio da vaga");
+  }
+  if (jobRank >= 6 && candidateRank > 0 && candidateRank < 5) {
+    rejectionReasons.push("senioridade atual muito abaixo da vaga");
   }
   if (jobRank >= 7 && candidateRank > 0 && candidateRank < 6) {
     rejectionReasons.push("senioridade atual incompatível com posição executiva");
   }
-
-  const explicitlyDivergent = normalizeEvidenceText(input.geographicLabel || "").includes("divergente");
   if (explicitlyDivergent) rejectionReasons.push("localização atual explicitamente fora do escopo");
 
   const eligible = rejectionReasons.length === 0;
-  const rawScore = Math.min(100, roleScore + seniorityScore + requiredScore + leadershipScore + complexityScore + geographyScore);
-  const score = eligible ? rawScore : Math.min(rawScore, 54);
+  const finalScore = eligible ? score : Math.min(score, 45);
   const classification = !eligible
     ? "rejected"
-    : score >= 85
+    : finalScore >= 78
       ? "high"
-      : score >= 70
+      : finalScore >= 60
         ? "validate"
         : "expansion";
 
-  const requiredEvidence = input.requiredConcepts.length
-    ? requiredMatches.map((item) => item.alias
-      ? `${item.label}: ${item.excerpt || item.alias}`
-      : `${item.label}: não confirmado no trecho público`).join(" | ")
-    : "nenhum conceito obrigatório estruturado";
-
   return {
     eligible,
-    score,
+    score: finalScore,
+    confirmedSignals,
     classification,
     rejectionReasons,
-    evidence: [
-      {
-        criterion: "role",
-        label: "Aderência funcional",
-        status: roleCoverage >= 0.75 ? "confirmed" : roleCoverage >= 0.5 ? "unconfirmed" : "failed",
-        score: roleScore,
-        maxScore: 25,
-        evidence: matchedRoleTokens.length
-          ? `Termos do cargo: ${matchedRoleTokens.join(", ")}${bestRoleMatch.role !== input.jobTitle ? ` · título equivalente: ${bestRoleMatch.role}` : ""}`
-          : "sem evidência do cargo correto",
-      },
-      {
-        criterion: "seniority",
-        label: "Senioridade atual",
-        status: seniorityScore >= 12 ? "confirmed" : candidateRank ? "failed" : "unconfirmed",
-        score: seniorityScore,
-        maxScore: 20,
-        evidence: candidateRank ? input.candidateTitle : "senioridade não confirmada",
-      },
-      {
-        criterion: "required",
-        label: "Critérios obrigatórios",
-        status: !input.requiredConcepts.length || requiredConfirmed.length === input.requiredConcepts.length
-          ? "confirmed"
-          : requiredConfirmed.length ? "unconfirmed" : "failed",
-        score: requiredScore,
-        maxScore: 25,
-        evidence: requiredEvidence,
-      },
-      {
-        criterion: "leadership",
-        label: "Liderança da função",
-        status: leadershipExcerpt ? "confirmed" : leadershipRequired ? "unconfirmed" : "confirmed",
-        score: leadershipScore,
-        maxScore: 10,
-        evidence: leadershipExcerpt || "liderança não confirmada no trecho público",
-      },
-      {
-        criterion: "complexity",
-        label: "Complexidade e abrangência",
-        status: complexityExcerpt ? "confirmed" : "unconfirmed",
-        score: complexityScore,
-        maxScore: 10,
-        evidence: complexityExcerpt || "abrangência não confirmada no trecho público",
-      },
-      {
-        criterion: "geography",
-        label: "Localização atual",
-        status: geographyScore >= 8 ? "confirmed" : explicitlyDivergent ? "failed" : "unconfirmed",
-        score: geographyScore,
-        maxScore: 10,
-        evidence: input.geographicLabel || "localização não confirmada",
-      },
-    ],
+    evidence: criteria,
   };
 }

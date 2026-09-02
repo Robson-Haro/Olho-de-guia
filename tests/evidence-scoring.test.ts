@@ -50,7 +50,7 @@ test("elimina RH generalista sem aderência funcional", () => {
   });
 
   assert.equal(result.eligible, false);
-  assert.ok(result.rejectionReasons.includes("cargo funcional incompatível com a vaga"));
+  assert.ok(result.rejectionReasons.includes("sem evidência pública da função nem do domínio da vaga"));
 });
 
 test("localização atual divergente é eliminatória", () => {

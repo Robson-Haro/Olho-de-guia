@@ -27,6 +27,20 @@ export type TalentSearchInput = {
   keywords: string[];
   semanticKeywords?: string[];
   requiredKeywordConcepts?: RequiredKeywordConcept[];
+  /** Núcleo funcional da vaga em PT/EN/ES, produzido pelo léxico do motor Python. */
+  roleCore?: string[];
+  /** Conceitos de domínio da vaga, cada um com os seus sinônimos. */
+  domainConcepts?: string[][];
+  /** Termos de hierarquia da vaga nos três idiomas. */
+  levelTerms?: string[];
+  /** Títulos de mercado que já produziram aprovação nesta família de vaga. */
+  learnedTitles?: string[];
+  /** Termos recorrentes nos perfis aprovados desta família de vaga. */
+  learnedTerms?: string[];
+  /** Empregadores de onde os aprovados desta família costumam vir. */
+  learnedCompanies?: string[];
+  /** Títulos com histórico de descarte. Rebaixam a nota; nunca eliminam. */
+  demotedTitles?: string[];
   countrywide: boolean;
   maxCandidates: number;
   /** Quando verdadeiro, elimina quem não evidencia TODOS os conceitos obrigatórios. */
@@ -65,6 +79,10 @@ export type TalentCandidate = {
   fitClassification?: "high" | "validate" | "expansion" | "rejected";
   rejectionReasons?: string[];
   evidence?: CandidateEvidence[];
+  /** O que a memória da vaga reconheceu neste perfil. */
+  memoryNotes?: string[];
+  /** Parecer da camada de leitura, quando ela estiver ativa. */
+  aiVerdict?: { veredito: "forte" | "provavel" | "fraco"; nota: number; justificativa: string; evidencia: string };
   /** Presente apenas quando a chave de gênero está ativa na busca. */
   gender?: GenderInference;
   scoreBreakdown?: {
@@ -75,6 +93,7 @@ export type TalentCandidate = {
     ruido: number;
     evidencia?: number;
     segmento?: number;
+    memoria?: number;
   };
 };
 
@@ -105,13 +124,44 @@ const PROVIDER = {
 } as const;
 
 /**
- * Orçamento de consultas. Cada consulta com até 10 resultados custa 1 crédito
- * no Serper; pedir 11 a 100 resultados custa 2 créditos. Por isso paginamos de
- * 10 em 10: é o modo mais barato por perfil encontrado.
+ * Orçamento de consultas.
+ *
+ * A versão anterior paginava de 10 em 10 afirmando ser "o modo mais barato por
+ * perfil encontrado". É o contrário. No Serper, uma consulta de até 10
+ * resultados custa 1 crédito e uma consulta de 11 a 100 resultados custa 2 —
+ * ou seja, 10 perfis por crédito contra 50 perfis por crédito. Pedir a página
+ * cheia é cinco vezes mais barato por perfil.
+ *
+ * O orçamento passa a ser contado em CRÉDITOS, não em consultas, para que a
+ * conta continue explícita: 12 créditos são 6 consultas profundas e até 600
+ * perfis brutos, contra os 80 do plano anterior.
  */
-const SEARCH_BUDGET = Math.max(4, Math.min(16, Number(process.env.EUREKA_SERPER_BUDGET) || 8));
-const RESULTS_PER_QUERY = 10;
+const CREDIT_BUDGET = Math.max(6, Math.min(30, Number(process.env.EUREKA_SERPER_BUDGET) || 12));
+const RESULTS_PER_QUERY = 100;
+const CREDITS_PER_QUERY = 2;
+const SEARCH_BUDGET = Math.max(3, Math.floor(CREDIT_BUDGET / CREDITS_PER_QUERY));
 const PARALLEL_BATCH = 3;
+
+/**
+ * Subdomínio público do LinkedIn por país. Restringir o `site:` ao subdomínio
+ * do país entrega a geografia ao Google sem gastar uma única palavra do
+ * orçamento da consulta — que era exatamente o bloco descartado quando a lista
+ * de sinônimos crescia.
+ */
+const LINKEDIN_COUNTRY_HOSTS: Record<string, string> = {
+  AR: "ar", AU: "au", BE: "be", BO: "bo", BR: "br", CA: "ca", CH: "ch", CL: "cl",
+  CO: "co", CR: "cr", DE: "de", DK: "dk", EC: "ec", ES: "es", FR: "fr", GB: "uk",
+  GT: "gt", HN: "hn", IE: "ie", IN: "in", IT: "it", MX: "mx", NL: "nl", NO: "no",
+  NZ: "nz", PA: "pa", PE: "pe", PL: "pl", PT: "pt", PY: "py", SE: "se", SV: "sv",
+  UY: "uy", VE: "ve", ZA: "za",
+};
+
+/**
+ * Exclusões aplicadas na PRÓPRIA consulta. Antes, um anúncio de vaga era
+ * recuperado, pontuado e só então penalizado em 12 pontos — gastando resultado
+ * pago para depois descartá-lo. Excluir na origem devolve espaço para perfis.
+ */
+const NOISE_EXCLUSIONS = '-intitle:vagas -intitle:jobs -"estamos contratando"';
 const SERPER_TIMEOUT_MS = Math.max(6000, Number(process.env.EUREKA_SERPER_TIMEOUT_MS) || 12000);
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -598,17 +648,62 @@ function calculateCompatibility(
   const evidenceAssessment = assessCandidateEvidence({
     jobTitle: input.title,
     roleAlternatives: input.titleVariants,
+    roleCore: input.roleCore,
+    domainConcepts: input.domainConcepts,
     candidateTitle: candidate.title,
     candidateText,
     requiredConcepts: requiredEvidence.concepts,
     geographicMatch: candidate.geographicMatch || "unknown",
     geographicLabel: candidate.geographicLabel,
   });
-  // A evidência governa 75% da nota. O ranking legado contribui apenas como
-  // desempate; nunca consegue compensar uma reprovação eliminatória.
+  // ------------------------------------------------------------------ //
+  // AJUSTE PELA MEMÓRIA DA VAGA
+  //
+  // O que o time já aprovou nesta família de vaga reordena a lista; o que já
+  // descartou repetidamente desce. Duas travas preservam o critério de
+  // precisão:
+  //
+  // 1. A memória só MOVE quem já é elegível. Ela nunca torna elegível quem as
+  //    regras reprovaram — a porta lateral que a Onda 1 fechou continua
+  //    fechada, inclusive para o aprendizado.
+  // 2. O rebaixamento é limitado e reversível. Um título descartado perde
+  //    pontos, mas continua na lista: uma decisão pontual de um recrutador não
+  //    pode apagar um perfil para sempre.
+  // ------------------------------------------------------------------ //
+  const learnedTitleHit = (input.learnedTitles || []).find((title) =>
+    title.length > 3 && includesNormalized(candidate.title || "", title),
+  );
+  const learnedTermHits = (input.learnedTerms || []).filter((term) =>
+    term.length > 3 && includesNormalized(candidateText, term),
+  );
+  const learnedCompanyHit = (input.learnedCompanies || []).find((company) =>
+    company.length > 2 && includesNormalized(candidateText, company),
+  );
+  const demotedHit = (input.demotedTitles || []).find((title) =>
+    title.length > 3 && includesNormalized(candidate.title || "", title),
+  );
+  const memoryBonus = Math.min(
+    12,
+    (learnedTitleHit ? 6 : 0) + Math.min(4, learnedTermHits.length * 2) + (learnedCompanyHit ? 3 : 0),
+  );
+  const memoryPenalty = demotedHit ? 10 : 0;
+  const memoryNotes: string[] = [];
+  if (learnedTitleHit) memoryNotes.push(`cargo já aprovado pelo time: ${learnedTitleHit}`);
+  if (learnedTermHits.length) memoryNotes.push(`termos do histórico: ${learnedTermHits.slice(0, 3).join(", ")}`);
+  if (learnedCompanyHit) memoryNotes.push(`empresa de origem recorrente: ${learnedCompanyHit}`);
+  if (demotedHit) memoryNotes.push(`atenção: cargo já descartado antes nesta vaga (${demotedHit})`);
+
+  // A nota é a da avaliação por evidência, sem mistura.
+  //
+  // Antes, 25% da nota vinha do ranking legado — que divide todo candidato por
+  // um total fixo no qual localização e empresa do segmento valem 25 pontos
+  // quase inalcançáveis num trecho de 160 caracteres. Misturar os dois
+  // reintroduzia pela porta dos fundos exatamente o teto que a normalização
+  // veio corrigir. O cálculo legado continua sendo exibido no detalhamento,
+  // como trilha de auditoria.
   const compatibility = evidenceAssessment.eligible
-    ? Math.round((evidenceAssessment.score * 0.75) + (legacyCompatibility * 0.25))
-    : Math.min(54, evidenceAssessment.score);
+    ? Math.max(0, Math.min(100, evidenceAssessment.score + memoryBonus - memoryPenalty))
+    : evidenceAssessment.score;
 
   const tier: CandidateTier = !requiredEvidence.concepts.length
     ? "A"
@@ -631,6 +726,7 @@ function calculateCompatibility(
   ];
   if (input.marketSegment) reasons.push(matchedCompany ? `empresa do segmento: ${matchedCompany}` : "segmento direcionado pela consulta; empresa a confirmar");
   if (noise.labels.length) reasons.push(`atenção: ${noise.labels.join(", ")}`);
+  reasons.push(...memoryNotes);
 
   return {
     compatibility,
@@ -644,6 +740,7 @@ function calculateCompatibility(
     fitClassification: evidenceAssessment.classification,
     rejectionReasons: evidenceAssessment.rejectionReasons,
     evidence: evidenceAssessment.evidence,
+    memoryNotes,
     scoreBreakdown: {
       cargo: role.score,
       senioridade: seniority.score,
@@ -651,23 +748,50 @@ function calculateCompatibility(
       localidade: locationScore,
       ruido: -noise.penalty,
       segmento: segmentScore,
+      memoria: memoryBonus - memoryPenalty,
+      // Cálculo legado, mantido apenas como trilha de auditoria: permite
+      // comparar a nota nova com a régua anterior sem que ela volte a
+      // influenciar a ordem da lista.
+      evidencia: legacyCompatibility,
     },
   };
 }
 
+/**
+ * Triagem de entrada no conjunto avaliado.
+ *
+ * A regra anterior exigia que metade das palavras do TÍTULO DIGITADO pelo
+ * recrutador aparecesse no título do perfil — antes de qualquer tradução. Um
+ * "Foreign Trade Analyst" numa vaga de "Analista de Comércio Exterior" era
+ * descartado aqui, sem nunca chegar à avaliação. Exigia também senioridade
+ * visível numa vaga de gerência, o que reprovava por falha de formatação do
+ * índice do Google, não por incompatibilidade.
+ *
+ * A regra nova é a MESMA das outras duas camadas — exerce a função ou
+ * demonstra o domínio — aplicada sobre o vocabulário traduzido pelo léxico.
+ * Três camadas, uma regra, um vocabulário.
+ */
 function passesMinimumProfessionalFit(
   candidate: Pick<TalentCandidate, "title" | "company" | "summary">,
   input: TalentSearchInput,
 ) {
   const titleText = [candidate.title, candidate.company].filter(Boolean).join(" ");
-  const role = roleScore(titleText || candidate.summary || "", input);
+  const fullText = [titleText, candidate.summary].filter(Boolean).join(" ");
+  const core = (input.roleCore || []).filter((term) => term.length > 3);
+  const hasFunction = core.length
+    ? core.some((term) => includesNormalized(fullText, term))
+    : roleScore(titleText || candidate.summary || "", input).score >= 8;
+  const domainHits = (input.domainConcepts || []).filter((group) =>
+    group.some((term) => term.length > 3 && includesNormalized(fullText, term)),
+  ).length;
+  if (!hasFunction && domainHits < 2) return false;
+
+  // Senioridade só elimina quando é VISÍVEL e distante. Ausência de nível no
+  // trecho público é falha do índice, e a avaliação seguinte já trata disso.
   const jobLevel = detectSeniority(input.title);
   const candidateLevel = detectSeniority(titleText);
-  if (role.score < 8) return false;
-  if (!jobLevel) return true;
-  const jobIndex = SENIORITY_ORDER.indexOf(jobLevel.key);
-  if (!candidateLevel) return jobIndex < SENIORITY_ORDER.indexOf("manager");
-  return Math.abs(jobIndex - SENIORITY_ORDER.indexOf(candidateLevel.key)) <= 1;
+  if (!jobLevel || !candidateLevel) return true;
+  return Math.abs(SENIORITY_ORDER.indexOf(jobLevel.key) - SENIORITY_ORDER.indexOf(candidateLevel.key)) <= 2;
 }
 
 function parseProfessionalTitle(value: unknown) {
@@ -782,7 +906,7 @@ type SerperSearch = {
   query: string;
   page: number;
   targetCities: string[];
-  layer: "ancora" | "variante" | "dominio" | "profundidade" | "adaptativa" | "genero";
+  layer: "ancora" | "variante" | "dominio" | "profundidade" | "adaptativa" | "genero" | "memoria";
 };
 
 function simplifiedTitle(value: string) {
@@ -827,19 +951,51 @@ function citySearchGroups(cities: string[]) {
   return groups;
 }
 
+/**
+ * Alvo do operador `site:`. Quando o país tem subdomínio próprio no LinkedIn, a
+ * geografia do país inteiro é resolvida aqui, de graça, em vez de ocupar cinco
+ * palavras da consulta com um grupo OR de sinônimos do nome do país.
+ */
+function linkedinSiteTarget(countryCode: string, localized: boolean) {
+  const host = LINKEDIN_COUNTRY_HOSTS[countryCode.toUpperCase()];
+  return localized && host ? `site:${host}.linkedin.com/in` : "site:linkedin.com/in";
+}
+
+/**
+ * Geografia dentro da consulta: apenas cidade e região. O país já foi resolvido
+ * pelo subdomínio e pelo parâmetro `gl` do Serper.
+ *
+ * A medição mostrou que o bloco geográfico custava 19 das 30 palavras do
+ * orçamento e era descartado inteiro assim que a lista de sinônimos crescia —
+ * a busca ia ao Google sem cidade, sem estado e sem país. Agora o bloco tem no
+ * máximo quatro cidades e entra ANTES dos conceitos na ordem de prioridade.
+ */
 function geographicQuery(input: TalentSearchInput, cities: string[]) {
-  const profile = getCountryProfile(input.countryCode);
-  const countryTerms = profile.aliases
-    .slice(0, 4)
-    .map(exactPhrase)
-    .filter(Boolean);
-  const countryExpression = countryTerms.length > 1 ? `(${countryTerms.join(" OR ")})` : countryTerms[0] || "";
-  if (input.countrywide) return countryExpression;
-  const cityTerms = cities.map(exactPhrase).filter(Boolean);
+  if (input.countrywide) return "";
+  const cityTerms = cities.slice(0, 4).map(exactPhrase).filter(Boolean);
   const cityExpression = cityTerms.length > 1 ? `(${cityTerms.join(" OR ")})` : cityTerms[0] || "";
-  return [cityExpression, input.subdivision ? exactPhrase(input.subdivision) : "", countryExpression]
-    .filter(Boolean)
-    .join(" ");
+  return cityExpression || (input.subdivision ? exactPhrase(input.subdivision) : "");
+}
+
+/**
+ * Consulta pelo NÚCLEO funcional combinado com a hierarquia, nos três idiomas.
+ *
+ * Substitui a tentativa de adivinhar a ordem das palavras do título em cada
+ * idioma — que produzia expressões inexistentes como "Supervisor de Slaughter".
+ * `("supervisor" OR "supervisora") ("abate" OR "slaughter" OR "faena")` alcança
+ * qualquer ordem e é a consulta que traz o profissional cujo perfil está em
+ * outro idioma.
+ */
+function roleCoreExpression(input: TalentSearchInput, maxTerms = 5) {
+  const core = unique((input.roleCore || []).map(naturalSearchTerm).filter(Boolean)).slice(0, maxTerms);
+  if (!core.length) return { core: "", level: "" };
+  const levels = unique((input.levelTerms || []).map(naturalSearchTerm).filter(Boolean)).slice(0, 3);
+  const coreTerms = core.map(exactPhrase).filter(Boolean);
+  const levelTerms = levels.map(exactPhrase).filter(Boolean);
+  return {
+    core: coreTerms.length > 1 ? `(${coreTerms.join(" OR ")})` : coreTerms[0] || "",
+    level: levelTerms.length > 1 ? `(${levelTerms.join(" OR ")})` : levelTerms[0] || "",
+  };
 }
 
 /**
@@ -852,8 +1008,12 @@ function buildSearchPlan(input: TalentSearchInput) {
   const queryConcepts = requiredConcepts.filter((concept) => !requiredConcepts.some((possibleSource) =>
     (REQUIRED_KEYWORD_IMPLICATIONS[possibleSource.label] || []).includes(concept.label),
   ));
+  // Três sinônimos por conceito, não dez. Um grupo OR de dez expressões
+  // consumia sozinho 21 das 30 palavras da consulta e empurrava a geografia
+  // para fora — o profissional certo voltava do país errado. Os sinônimos
+  // restantes continuam valendo no ranking, onde não custam nada.
   const conceptGroups = queryConcepts.map((concept) => {
-    const aliases = concept.aliases.slice(0, 10).map(exactPhrase).filter(Boolean);
+    const aliases = concept.aliases.slice(0, 3).map(exactPhrase).filter(Boolean);
     return aliases.length > 1 ? `(${aliases.join(" OR ")})` : aliases[0] || "";
   }).filter(Boolean);
   // Nunca juntamos todos os conceitos com AND numa única consulta: o índice do
@@ -884,26 +1044,56 @@ function buildSearchPlan(input: TalentSearchInput) {
   const companyExpression = (input.mappedCompanies || []).slice(0, 8).map(exactPhrase).filter(Boolean);
   const companies = companyExpression.length > 1 ? `(${companyExpression.join(" OR ")})` : companyExpression[0] || "";
 
-  // Os blocos são entregues em ordem de prioridade: sem cargo a consulta não
-  // faz sentido, sem geografia ela devolve o mundo inteiro, e a lista de
-  // empresas é o primeiro item a ser sacrificado quando o orçamento aperta.
-  const push = (blocks: string[], page: number, targetCities: string[], layer: SerperSearch["layer"]) => {
-    const query = boundedSearchQuery(["site:linkedin.com/in", ...blocks]);
+  // ORDEM DE PRIORIDADE DOS BLOCOS.
+  //
+  // O orçamento de palavras descarta inteiro o primeiro bloco que não couber.
+  // Na versão anterior a ordem era cargo → conceito → geografia → empresas, e o
+  // conceito era gordo o bastante para estourar o orçamento sozinho: a
+  // geografia caía sempre. A geografia passa a vir ANTES do conceito, porque
+  // uma busca sem critério devolve profissionais demais na região certa,
+  // enquanto uma busca sem região devolve o mundo inteiro.
+  const push = (blocks: string[], page: number, targetCities: string[], layer: SerperSearch["layer"], localized = true) => {
+    const query = boundedSearchQuery([linkedinSiteTarget(input.countryCode, localized), ...blocks, NOISE_EXCLUSIONS]);
     if (query) searches.push({ query, page, targetCities, layer });
   };
 
-  // Camada 1 — âncora: título exato + UM conceito prioritário + geografia.
+  // Camada 1 — âncora: título exato + geografia + UM conceito prioritário.
   const primaryTitle = exactPhrase(titles[0] || input.title);
-  for (const [index, targetCities] of groups.slice(0, 3).entries()) {
+  for (const [index, targetCities] of groups.slice(0, 2).entries()) {
     const concept = conceptExpressions[index % conceptExpressions.length] || semanticExpression;
-    push([primaryTitle, concept, geographicQuery(input, targetCities), companies], 1, targetCities, "ancora");
+    push([primaryTitle, geographicQuery(input, targetCities), concept, companies], 1, targetCities, "ancora");
   }
 
-  // Camada 2 — variantes de cargo com apenas o conceito mais distintivo. Exigir
-  // todos os critérios no snippet do Google diminuía demais a cobertura.
-  for (const [index, variant] of titles.slice(1, 6).entries()) {
+  // Camada 2 — núcleo funcional × hierarquia, nos três idiomas. É a camada que
+  // alcança o profissional cujo perfil está em inglês ou espanhol, e a única
+  // que independe de o título do mercado coincidir palavra por palavra com o
+  // título digitado pelo recrutador.
+  const roleCore = roleCoreExpression(input);
+  if (roleCore.core) {
+    push([roleCore.level, roleCore.core, geographicQuery(input, sharedCities)], 1, sharedCities, "variante");
+    // Uma repetição sem o recorte do subdomínio: perfis de estrangeiros
+    // residentes no país ficam indexados fora do subdomínio local.
+    push([roleCore.level, roleCore.core, geographicQuery(input, sharedCities)], 1, sharedCities, "variante", false);
+  }
+
+  // Camada de memória — títulos que JÁ produziram aprovação nesta família de
+  // vaga, e as empresas de onde os aprovados vieram. É a camada que devolve o
+  // aprendizado do time para dentro da busca: ela procura o que a casa já
+  // provou que funciona, em vez de recomeçar do vocabulário genérico.
+  const learnedTitles = unique((input.learnedTitles || []).map(naturalSearchTerm).filter(Boolean)).slice(0, 4);
+  const learnedCompanyExpression = (input.learnedCompanies || []).slice(0, 6).map(exactPhrase).filter(Boolean);
+  const learnedCompanies = learnedCompanyExpression.length > 1
+    ? `(${learnedCompanyExpression.join(" OR ")})`
+    : learnedCompanyExpression[0] || "";
+  for (const learned of learnedTitles.slice(0, 2)) {
+    const flexed = (input.genderKey && genderedTitle(learned, input.genderKey)) || learned;
+    push([exactPhrase(flexed), geographicQuery(input, sharedCities), learnedCompanies], 1, sharedCities, "memoria");
+  }
+
+  // Camada 3 — variantes de cargo com apenas o conceito mais distintivo.
+  for (const [index, variant] of titles.slice(1, 4).entries()) {
     const concept = conceptExpressions[index % conceptExpressions.length] || discoveryConcept;
-    push([exactPhrase(variant), concept, geographicQuery(input, sharedCities), companies], 1, sharedCities, "variante");
+    push([exactPhrase(variant), geographicQuery(input, sharedCities), concept, companies], 1, sharedCities, "variante");
   }
 
   // Camada de gênero — existe somente quando a chave está ativa. O pronome
@@ -913,25 +1103,26 @@ function buildSearchPlan(input: TalentSearchInput) {
     const pronouns = genderPronounExpression(input.genderKey);
     const flexedTitle = genderedTitle(input.title, input.genderKey);
     if (flexedTitle) {
-      push([exactPhrase(flexedTitle), discoveryConcept, geographicQuery(input, sharedCities)], 1, sharedCities, "genero");
+      push([exactPhrase(flexedTitle), geographicQuery(input, sharedCities), discoveryConcept], 1, sharedCities, "genero");
     }
     push([primaryTitle, pronouns, geographicQuery(input, sharedCities)], 1, sharedCities, "genero");
   }
 
-  // Camada 3 — domínio: quem tem a expertise mas usa outro nome de cargo.
+  // Camada 4 — domínio: quem tem a expertise mas usa outro nome de cargo.
   if (semanticExpression) {
     const jobLevel = detectSeniority(input.title);
     const levelExpression = jobLevel
-      ? `(${jobLevel.terms.slice(0, 4).map(exactPhrase).filter(Boolean).join(" OR ")})`
-      : "";
-    push([discoveryConcept || semanticExpression, levelExpression, geographicQuery(input, sharedCities), companies], 1, sharedCities, "dominio");
+      ? `(${jobLevel.terms.slice(0, 3).map(exactPhrase).filter(Boolean).join(" OR ")})`
+      : roleCore.level;
+    push([levelExpression, discoveryConcept || semanticExpression, geographicQuery(input, sharedCities)], 1, sharedCities, "dominio");
   }
 
-  // Camada 4 — profundidade progressiva. A página 2 mantém o conceito mais
-  // distintivo; a página 3 relaxa os critérios somente para ampliar o pool. O
-  // ranking A/B/C continua impedindo que o perfil relaxado passe à frente.
-  push([primaryTitle, discoveryConcept, geographicQuery(input, sharedCities)], 2, sharedCities, "profundidade");
-  push([primaryTitle, geographicQuery(input, sharedCities)], 3, sharedCities, "profundidade");
+  // Camada 5 — profundidade. Com 100 resultados por consulta, a página 1 já
+  // devolve o que antes exigia dez páginas; a página 2 é a continuação natural
+  // da âncora. A antiga camada que "relaxava os critérios para ampliar o pool"
+  // foi removida: ampliar o conjunto afrouxando o cargo é precisamente o que
+  // enche a lista de perfil errado.
+  push([primaryTitle, geographicQuery(input, sharedCities), discoveryConcept], 2, sharedCities, "profundidade");
 
   const seen = new Set<string>();
   return searches.filter((item) => {
@@ -939,10 +1130,9 @@ function buildSearchPlan(input: TalentSearchInput) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-    // Com o mapeamento de empresas deixando de gastar 2 créditos por busca, o
-    // plano inicial pode ocupar mais consultas e ainda sobra folga para a
-    // rodada adaptativa orientada pelos resultados.
-  }).slice(0, Math.max(4, SEARCH_BUDGET - 2));
+    // Uma consulta é reservada para a rodada adaptativa, que reaproveita os
+    // títulos dos perfis mais aderentes já encontrados.
+  }).slice(0, Math.max(3, SEARCH_BUDGET - 1));
 }
 
 /**
@@ -983,10 +1173,11 @@ function buildAdaptiveSearchPlan(
     // recorte pedido pelo recrutador.
     const learnedTitle = (input.genderKey && genderedTitle(title, input.genderKey)) || title;
     const query = boundedSearchQuery([
-      "site:linkedin.com/in",
+      linkedinSiteTarget(input.countryCode, true),
       exactPhrase(learnedTitle),
-      conceptExpression,
       geographicQuery(input, targetCities),
+      conceptExpression,
+      NOISE_EXCLUSIONS,
     ]);
     const key = `${query.toLowerCase()}|1`;
     if (query && !used.has(key)) searches.push({ query, page: 1, targetCities, layer: "adaptativa" });
@@ -1148,7 +1339,10 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
     // Interrompe cedo apenas quando já existe folga real de perfis de primeira
     // linha — nunca antes de ter material suficiente para ranquear.
     const strongCandidates = deduplicate(pool).filter((candidate) => candidate.tier === "A");
-    if (strongCandidates.length >= maxCandidates * 3) break;
+    // Com 100 resultados por consulta, o conjunto cresce muito mais rápido.
+    // A parada antecipada exige folga de perfis de primeira linha para não
+    // gastar créditos depois que a lista já está formada.
+    if (strongCandidates.length >= maxCandidates * 5) break;
   }
 
   const initialRanked = orderCandidates(deduplicate(pool));
@@ -1190,7 +1384,11 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
 
   return {
     candidates: ranked.slice(0, maxCandidates),
-    pool: ranked.slice(0, Math.max(maxCandidates, 60)),
+    // Reserva enviada ao motor Python. Subiu de 60 para 200 porque o conjunto
+    // avaliado passou de dezenas para centenas de perfis: truncar em 60 antes
+    // do ranking devolveria o problema original — o corte acontecendo antes da
+    // avaliação, e não depois.
+    pool: ranked.slice(0, Math.max(maxCandidates, 200)),
     queries,
     poolSize: ranked.length,
     tiers,

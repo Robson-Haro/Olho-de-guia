@@ -83,6 +83,8 @@ type Candidate = {
     source: string;
     basis: string;
   };
+  memoryNotes?: string[];
+  aiVerdict?: { veredito: "forte" | "provavel" | "fraco"; nota: number; justificativa: string; evidencia: string };
   scoreBreakdown?: {
     cargo: number;
     senioridade: number;
@@ -91,7 +93,33 @@ type Candidate = {
     ruido: number;
     evidencia?: number;
     segmento?: number;
+    memoria?: number;
   };
+};
+
+type RoleMemoryView = {
+  roleKey: string;
+  roleLabel?: string;
+  active?: boolean;
+  searchCount: number;
+  approvedCount: number;
+  discardedCount: number;
+  hiredCount: number;
+  confirmedTitles?: Array<{ title: string; approvals: number }>;
+  confirmedTerms?: Array<{ term: string; approvals: number }>;
+  companies?: Array<{ company: string; approvals: number }>;
+  demotedTitles?: string[];
+  learnedTitles?: string[];
+  learnedTerms?: string[];
+  learnedCompanies?: string[];
+};
+
+type AiReadingView = {
+  configured: boolean;
+  applied: boolean;
+  notes: string;
+  addedTerms: number;
+  costUsd: number;
 };
 
 type GenderKey = "" | "feminino" | "masculino";
@@ -133,6 +161,12 @@ type JobIntelligence = {
   equivalentTitles: string[];
   skills: string[];
   requiredKeywords?: Array<{ label: string; aliases: string[] }>;
+  /** Núcleo funcional da vaga em PT/EN/ES, produzido pelo léxico. */
+  roleCore?: string[];
+  /** Conceitos de domínio da vaga, cada um com os seus sinônimos. */
+  domainConcepts?: string[][];
+  /** Termos de hierarquia da vaga nos três idiomas. */
+  levelTerms?: string[];
   languages: string[];
 };
 
@@ -197,6 +231,10 @@ export default function HomePage() {
     includeUnknownGender: false,
   });
   const [genderAudit, setGenderAudit] = useState<GenderAudit | null>(null);
+  const [aiReading, setAiReading] = useState<AiReadingView | null>(null);
+  const [roleMemory, setRoleMemory] = useState<RoleMemoryView | null>(null);
+  const [decisions, setDecisions] = useState<Record<string, "aprovado" | "descartado" | "contratado">>({});
+  const [decisionBusy, setDecisionBusy] = useState("");
   const [expansionCount, setExpansionCount] = useState(0);
   const [searchStatus, setSearchStatus] = useState<"idle" | "working" | "completed" | "empty" | "error">("idle");
   const [searchMessage, setSearchMessage] = useState("");
@@ -217,6 +255,12 @@ export default function HomePage() {
     >("idle"),
     [configMessage, setConfigMessage] = useState("");
   const [talentKeys, setTalentKeys] = useState({ serper: "" });
+  // Senha administrativa exigida pelas rotas de gravação de credenciais. Fica
+  // apenas na aba aberta (sessionStorage): nunca vai para o banco, e some ao
+  // fechar o navegador.
+  const [adminKey, setAdminKey] = useState("");
+  const [adminKeyConfigured, setAdminKeyConfigured] = useState(true);
+  const [showAdminKey, setShowAdminKey] = useState(false);
   const [showTalentKeys, setShowTalentKeys] = useState({ serper: false });
   const [talentSourceStatus, setTalentSourceStatus] = useState<TalentSourceStatus[]>([]);
   const [talentIntegration, setTalentIntegration] = useState<Record<"serper", IntegrationState>>({
@@ -237,6 +281,8 @@ export default function HomePage() {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Falha ao consultar fontes.");
         setTalentSourceStatus(Array.isArray(data.sources) ? data.sources : []);
+        setAdminKeyConfigured(data.adminKeyConfigured !== false);
+        setAdminKey((current) => current || sessionStorage.getItem("eureka_admin_key") || "");
       })
       .catch(() => setTalentSourceStatus([]));
   }, [active]);
@@ -294,7 +340,7 @@ export default function HomePage() {
     try {
       const response = await fetch("/api/admin/gupy-token", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "x-eureka-admin-key": adminKey },
           body: JSON.stringify({ token: gupyToken, action }),
         }),
         data = await response.json();
@@ -321,12 +367,13 @@ export default function HomePage() {
     try {
       const response = await fetch("/api/admin/talent-source", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-eureka-admin-key": adminKey },
         body: JSON.stringify({ provider, apiKey, action }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Falha na configuração.");
       setTalentIntegration((current) => ({ ...current, [provider]: { status: "success", message: data.message } }));
+      if (adminKey) sessionStorage.setItem("eureka_admin_key", adminKey);
       if (action === "save") {
         setTalentKeys((current) => ({ ...current, [provider]: "" }));
         const statusResponse = await fetch("/api/admin/talent-source", { cache: "no-store" });
@@ -381,7 +428,37 @@ export default function HomePage() {
     setExpansionCount(0);
   }
 
-  async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = [], mappedCompanies: string[] = []) {
+  async function registerDecision(candidate: Candidate, decision: "aprovado" | "descartado" | "contratado") {
+    if (!roleMemory?.roleKey || !candidate.profileUrl) return;
+    setDecisionBusy(candidate.id);
+    try {
+      const response = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roleKey: roleMemory.roleKey,
+          roleLabel: jobForm.title,
+          profileUrl: candidate.profileUrl,
+          candidateTitle: candidate.title,
+          company: candidate.company,
+          summary: candidate.summary,
+          decision,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Falha ao registrar.");
+      setDecisions((current) => ({ ...current, [candidate.id]: decision }));
+      // A memória volta atualizada na mesma chamada: o recrutador vê o efeito
+      // da própria decisão em vez de alimentar uma caixa-preta.
+      if (data.memory) setRoleMemory((current) => ({ ...(current || {}), ...data.memory }));
+    } catch {
+      setDecisionBusy("");
+    } finally {
+      setDecisionBusy("");
+    }
+  }
+
+  async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = [], mappedCompanies: string[] = [], vocabulary: Record<string, unknown> = {}) {
     const profile = getCountryProfile(job.countryCode);
     const normalizedJob = {
       ...job,
@@ -390,6 +467,10 @@ export default function HomePage() {
       additionalCity: job.cities.slice(1).join(", "),
       nationwide: job.countrywide,
       mappedCompanies,
+      // Vocabulário ampliado pela leitura e pela memória. Sem repassá-lo, a
+      // busca encontraria o perfil em inglês e o ranking o descartaria por não
+      // reconhecer o termo — a dupla eliminação de volta, com outro nome.
+      ...vocabulary,
     };
     const response = await fetch("/svc/intelligence/analyze", {
       method: "POST",
@@ -416,6 +497,9 @@ export default function HomePage() {
     setPythonEvaluatedCount(0);
     setGenderAudit(null);
     setExpansionCount(0);
+    setAiReading(null);
+    setRoleMemory(null);
+    setDecisions({});
     setExportMessage("");
     try {
       let enrichedSearch = {
@@ -426,6 +510,9 @@ export default function HomePage() {
         titleVariants?: string[];
         semanticKeywords?: string[];
         requiredKeywordConcepts?: Array<{ label: string; aliases: string[] }>;
+        roleCore?: string[];
+        domainConcepts?: string[][];
+        levelTerms?: string[];
       };
       let pythonPrepared = false;
       let resolvedJobIntelligence: JobIntelligence | null = null;
@@ -441,6 +528,12 @@ export default function HomePage() {
           titleVariants: intelligence?.equivalentTitles || [],
           semanticKeywords: intelligence?.skills || [],
           requiredKeywordConcepts: intelligence?.requiredKeywords || [],
+          // Núcleo funcional e conceitos de domínio traduzidos pelo léxico. É o
+          // que faz a camada de busca decidir sobre o mesmo vocabulário do
+          // motor de ranking, em vez de manter uma lista própria.
+          roleCore: intelligence?.roleCore || [],
+          domainConcepts: intelligence?.domainConcepts || [],
+          levelTerms: intelligence?.levelTerms || [],
         };
         pythonPrepared = true;
         setSearchMessage("Cargos equivalentes identificados. Consultando perfis públicos do LinkedIn...");
@@ -456,6 +549,8 @@ export default function HomePage() {
       setSearchStrategies(Array.isArray(data.strategies) ? data.strategies : []);
       setProviderResults(Array.isArray(data.providers) ? data.providers : []);
       setGenderAudit(data.genderAudit || null);
+      setAiReading(data.aiReading || null);
+      setRoleMemory(data.memory || null);
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
       const foundCandidates = Array.isArray(data.candidates) ? data.candidates as Candidate[] : [];
       // O Python precisa reavaliar o conjunto amplo encontrado pelo Serper,
@@ -471,7 +566,13 @@ export default function HomePage() {
         try {
           setSearchMessage(`Reavaliando ${evaluationPool.length} perfis pelo motor Python multilíngue...`);
           const mappedCompanies = Array.isArray(data.mappedCompanies) ? data.mappedCompanies : [];
-          const rankingData = await requestPythonIntelligence(jobForm, evaluationPool, mappedCompanies);
+          const rankingData = await requestPythonIntelligence(jobForm, evaluationPool, mappedCompanies, {
+            roleCoreExtra: data.vocabulary?.roleCore || [],
+            domainConceptsExtra: data.vocabulary?.domainConcepts || [],
+            titleVariantsExtra: data.vocabulary?.titleVariants || [],
+            learnedTitles: data.memory?.learnedTitles || [],
+            learnedTerms: data.memory?.learnedTerms || [],
+          });
           if (Array.isArray(rankingData.candidates)) {
             rankedCandidates = rankingData.candidates.slice(0, candidateLimit);
             setPythonRankingActive(true);
@@ -489,6 +590,55 @@ export default function HomePage() {
           throw new Error("Os perfis foram encontrados, mas o motor de aderência não conseguiu validá-los. Nenhum candidato foi exibido.");
         }
       }
+      // ETAPA DE PARECER. Só recebe quem as regras JÁ aprovaram: o modelo pode
+      // confirmar, rebaixar ou recomendar descarte, nunca promover um perfil
+      // reprovado. Falha aqui não interrompe nada — a lista determinística
+      // continua sendo exibida.
+      let reviewed = rankedCandidates;
+      if (rankedCandidates.length && data.aiReading?.configured) {
+        try {
+          setSearchMessage(`Lendo os ${Math.min(rankedCandidates.length, 25)} perfis do topo e escrevendo o parecer de cada um...`);
+          const reviewResponse = await fetch("/api/review", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: jobForm.title,
+              description: jobForm.description,
+              candidates: rankedCandidates.slice(0, 25).map((candidate) => ({
+                id: candidate.id,
+                title: candidate.title,
+                company: candidate.company,
+                summary: candidate.summary,
+                city: candidate.city,
+                state: candidate.state,
+              })),
+            }),
+          });
+          const reviewData = await reviewResponse.json();
+          if (reviewResponse.ok && Array.isArray(reviewData.verdicts) && reviewData.verdicts.length) {
+            const byId = new Map<string, Candidate["aiVerdict"]>(
+              reviewData.verdicts.map((verdict: NonNullable<Candidate["aiVerdict"]> & { id: string }) => [verdict.id, verdict]),
+            );
+            reviewed = rankedCandidates.map((candidate) => {
+              const verdict = byId.get(candidate.id);
+              if (!verdict) return candidate;
+              // O parecer pesa 35% e só reordena. Um veredito "fraco" derruba o
+              // perfil para o fim da lista, mas ele continua visível: o
+              // recrutador precisa poder discordar do modelo.
+              const blended = Math.round(candidate.compatibility * 0.65 + verdict.nota * 0.35);
+              return {
+                ...candidate,
+                aiVerdict: verdict,
+                compatibility: verdict.veredito === "fraco" ? Math.min(blended, 44) : blended,
+              };
+            }).sort((left, right) => right.compatibility - left.compatibility);
+          }
+        } catch {
+          // parecer é opcional por desenho
+        }
+      }
+      rankedCandidates = reviewed;
+
       const queriesUsed = Array.isArray(data.providers)
         ? data.providers.reduce((total: number, provider: ProviderSearchStatus) => total + (Number(provider.queries) || 0), 0)
         : 0;
@@ -717,6 +867,27 @@ export default function HomePage() {
                 Conecte o Serper para localizar perfis públicos do LinkedIn pelo
                 Google. A chave é criptografada e usada apenas no servidor.
               </p>
+              <label className="adminKeyField">
+                <span>Senha administrativa</span>
+                <div className="secureInput">
+                  <ShieldCheck size={18} />
+                  <input
+                    type={showAdminKey ? "text" : "password"}
+                    value={adminKey}
+                    onChange={(event) => setAdminKey(event.target.value)}
+                    placeholder="Exigida para gravar chaves e tokens"
+                    autoComplete="off"
+                  />
+                  <button onClick={() => setShowAdminKey((current) => !current)} aria-label="Mostrar ou ocultar senha administrativa">
+                    {showAdminKey ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+                <small className={adminKeyConfigured ? "adminKeyNote" : "adminKeyNote adminKeyPending"}>
+                  {adminKeyConfigured
+                    ? "Sem esta senha, qualquer pessoa com o endereço do sistema poderia sobrescrever a chave do Serper e o token da Gupy. Ela fica só nesta aba do navegador."
+                    : "Ainda não há senha definida no servidor: a gravação de credenciais está bloqueada. Crie a variável de ambiente EUREKA_ADMIN_KEY na Vercel, com 16 caracteres ou mais, e recarregue esta página."}
+                </small>
+              </label>
               <div className="talentSourceList">
                 {(["serper"] as const).map((provider) => {
                   const configured = talentSourceStatus.find((source) => source.provider === provider)?.configured;
@@ -753,7 +924,7 @@ export default function HomePage() {
                         </div>
                       </label>
                       <small className="creditNote">
-                        Cada teste usa 1 consulta. A busca adaptativa usa até 8 consultas curtas do Serper para formar um conjunto amplo antes do ranking. A conta nova inclui 2.500 consultas gratuitas, sem cartão. Nenhum enriquecimento é realizado.
+                        Cada teste usa 1 crédito. Cada busca usa até 12 créditos: são 6 consultas de 100 resultados, e no Serper uma consulta de 100 resultados custa 2 créditos — cinco vezes mais barato por perfil do que pedir 10. A conta nova inclui 2.500 créditos gratuitos, sem cartão. Nenhum enriquecimento é realizado.
                       </small>
                       <a className="providerHelpLink" href="https://serper.dev/" target="_blank" rel="noreferrer">
                         Criar conta ou consultar saldo no Serper
@@ -1043,6 +1214,7 @@ export default function HomePage() {
                         <th>Empresa</th>
                         <th>Localização</th>
                         <th>LinkedIn</th>
+                        <th>Decisão</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1060,6 +1232,12 @@ export default function HomePage() {
                               Cargo {candidate.scoreBreakdown.cargo} · Senioridade {candidate.scoreBreakdown.senioridade} · Competências {candidate.scoreBreakdown.competencias} · Localidade {candidate.scoreBreakdown.localidade}{candidate.scoreBreakdown.segmento ? ` · Segmento ${candidate.scoreBreakdown.segmento}` : ""}{candidate.scoreBreakdown.ruido ? ` · Ruído ${candidate.scoreBreakdown.ruido}` : ""}{candidate.scoreBreakdown.evidencia ? ` · Ajuste de evidência ${candidate.scoreBreakdown.evidencia}` : ""}
                             </small>}
                             {candidate.evidenceLabel && <small className="evidenceConfidence">Confiança das evidências: {candidate.evidenceLabel}</small>}
+                            {candidate.aiVerdict && <div className={`aiVerdict ${candidate.aiVerdict.veredito}`}>
+                              <strong>{candidate.aiVerdict.veredito === "forte" ? "PARECER: FORTE" : candidate.aiVerdict.veredito === "provavel" ? "PARECER: PROVÁVEL" : "PARECER: FRACO"}</strong>
+                              <span>{candidate.aiVerdict.justificativa}</span>
+                              {candidate.aiVerdict.evidencia && <em>{candidate.aiVerdict.evidencia}</em>}
+                            </div>}
+                            {candidate.memoryNotes?.length ? <small className="memoryNote">{candidate.memoryNotes.join(" · ")}</small> : null}
                           </td>
                           <td>
                             <strong>{candidate.name}</strong>
@@ -1081,10 +1259,63 @@ export default function HomePage() {
                               ABRIR PERFIL <ChevronRight size={15} />
                             </a>
                           </td>
+                          <td>
+                            {roleMemory?.roleKey ? (
+                              decisions[candidate.id] ? (
+                                <span className={`decisionTag ${decisions[candidate.id]}`}>
+                                  {decisions[candidate.id] === "aprovado" ? "APROVADO" : decisions[candidate.id] === "contratado" ? "CONTRATADO" : "DESCARTADO"}
+                                </span>
+                              ) : (
+                                <div className="decisionButtons">
+                                  <button
+                                    className="approve"
+                                    disabled={decisionBusy === candidate.id}
+                                    onClick={() => registerDecision(candidate, "aprovado")}
+                                  >Aprovar</button>
+                                  <button
+                                    className="discard"
+                                    disabled={decisionBusy === candidate.id}
+                                    onClick={() => registerDecision(candidate, "descartado")}
+                                  >Descartar</button>
+                                </div>
+                              )
+                            ) : <small className="decisionOff">memória desligada</small>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                  {(aiReading || roleMemory) && <div className="learningPanel">
+                    <div className="learningHead">
+                      <Sparkles size={16} />
+                      <strong>O que o Eureka usou nesta busca</strong>
+                    </div>
+                    <div className="learningGrid">
+                      <div>
+                        <span className="learningLabel">Leitura da vaga</span>
+                        {!aiReading?.configured
+                          ? <p>Desligada. Configure <code>EUREKA_LLM_API_KEY</code> para o modelo ampliar o vocabulário de busca sozinho.</p>
+                          : aiReading.applied
+                            ? <p>Ativa — acrescentou {aiReading.addedTerms} termo(s) de mercado ao vocabulário do léxico.{aiReading.notes ? ` ${aiReading.notes}` : ""} Custo desta leitura: US$ {aiReading.costUsd.toFixed(4)}.</p>
+                            : <p>Configurada, mas não respondeu nesta busca. A lista seguiu pelo vocabulário do léxico, sem prejuízo.</p>}
+                      </div>
+                      <div>
+                        <span className="learningLabel">Memória desta família de vaga</span>
+                        {!roleMemory
+                          ? <p>Desligada. A memória depende do Supabase configurado no servidor.</p>
+                          : <p>
+                              {roleMemory.searchCount} busca(s) · {roleMemory.approvedCount} aprovado(s) · {roleMemory.hiredCount} contratado(s) · {roleMemory.discardedCount} descartado(s).
+                              {roleMemory.active
+                                ? " O histórico já influencia as consultas e a ordem da lista."
+                                : " Ainda aprendendo: a partir de duas aprovações o histórico passa a influenciar a busca."}
+                            </p>}
+                        {roleMemory?.learnedTitles?.length ? <p className="learningTerms"><strong>Cargos que já deram certo:</strong> {roleMemory.learnedTitles.join(" · ")}</p> : null}
+                        {roleMemory?.learnedCompanies?.length ? <p className="learningTerms"><strong>Empresas de origem:</strong> {roleMemory.learnedCompanies.join(" · ")}</p> : null}
+                        {roleMemory?.demotedTitles?.length ? <p className="learningTerms demoted"><strong>Cargos já descartados:</strong> {roleMemory.demotedTitles.join(" · ")}</p> : null}
+                      </div>
+                    </div>
+                    <small>O aprendizado altera quais consultas o Google recebe e a ordem da lista. Ele nunca aprova sozinho um perfil que as regras de aderência reprovaram, e cada linha do que foi aprendido pode ser consultada e apagada.</small>
+                  </div>}
                   <p className="scoreDisclaimer">O ranking considera somente informações profissionais da vaga e do trecho público indexado pelo Google. Não usa nem infere idade, raça, deficiência, saúde, religião ou outros atributos pessoais sensíveis.{genderAudit ? " A chave de gênero recorta o conjunto de sourcing e não altera a pontuação de nenhum perfil." : ""} Confirme o perfil completo no LinkedIn: a decisão final deve ser humana.</p>
                 </div> : <div className="emptyState"><UsersRound size={38} /><strong>{searchStatus === "working" ? "Busca em andamento" : searchStatus === "empty" ? "Busca finalizada sem perfis" : searchStatus === "error" ? "A busca automática não foi executada" : "Nenhuma busca ativada"}</strong><span>{searchStatus === "error" ? "Confira o aviso e conecte o Serper em Configurações." : "Preencha a vaga e consulte os perfis públicos pelo Serper."}</span></div>}
                 {searchStrategies.length > 0 && <div className="manualSearches">
