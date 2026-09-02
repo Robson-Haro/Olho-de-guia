@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleUserRound,
+  ClipboardCheck,
   Crosshair,
   Database,
   Download,
@@ -169,6 +170,7 @@ const nav = [
   { icon: UsersRound, label: "Candidatos" },
   { icon: ListChecks, label: "Shortlist" },
   { icon: Database, label: "Banco de talentos" },
+  { icon: ClipboardCheck, label: "Avaliação Interna Kairós" },
   { icon: Settings, label: "Configurações", admin: true },
 ];
 
@@ -626,7 +628,49 @@ export default function HomePage() {
             </div>
           </div>
         </header>
-        {active === "Configurações" ? (
+        {active === "Avaliação Interna Kairós" ? (
+          <section className="kairosView">
+            <article className="glass kairosHero">
+              <div>
+                <span className="kicker">AVALIAÇÃO INTERNA · KAIRÓS</span>
+                <h2>Gerente Executivo de Remuneração</h2>
+                <p>BI Recursos Humanos · São Paulo, São Paulo</p>
+              </div>
+              <div className="kairosCount"><strong>1</strong><span>INDICADO</span></div>
+            </article>
+
+            <article className="glass kairosCandidate">
+              <div className="kairosCandidateHead">
+                <div className="avatar">FA</div>
+                <div>
+                  <span className="kicker">CANDIDATO INDICADO</span>
+                  <h3>Fabio Adriano Pereira</h3>
+                  <p>Cargo atual: <strong>Gerente Executivo de Recursos Humanos</strong></p>
+                </div>
+                <div className="kairosScore"><strong>63%</strong><span>SCORE KAIRÓS</span></div>
+              </div>
+              <div className="kairosMetrics" aria-label="Detalhamento da avaliação">
+                <span>Requisitos <b>67%</b></span>
+                <span>Descrição do cargo <b>67%</b></span>
+                <span>Experiência <b>100%</b></span>
+                <span>Aspiração <b>0%</b></span>
+                <span>Nota <b>3,0/5</b></span>
+                <span>Potencial <b>2,8/5</b></span>
+              </div>
+              <div className="kairosAnalysis">
+                <p><strong>Análise do sistema:</strong> Sem descrição de cargo vinculada; foram utilizados os dados da própria vaga.</p>
+                <p><strong>Termos fortes:</strong> gerente, executivo, remuneração e recursos.</p>
+                <p><strong>Movimento de carreira:</strong> lateral, no mesmo nível — Gerente Executivo.</p>
+                <p><strong>Evidências obrigatórias de Remuneração e Benefícios:</strong> remuneração, cargos ou estrutura salarial, headcount ou quadro de pessoal, remuneração variável ou benefícios.</p>
+              </div>
+            </article>
+
+            <aside className="kairosNoMore">
+              <CheckCircle2 size={23} />
+              <div><strong>Busca concluída</strong><span>Não foram encontrados outros candidatos aptos para a posição.</span></div>
+            </aside>
+          </section>
+        ) : active === "Configurações" ? (
           <section className="settingsView">
             <article className="glass settingsCard">
               <div className="sectionTitle">
