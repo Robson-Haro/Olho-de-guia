@@ -34,6 +34,7 @@ class JobInput(BaseModel):
     # qual recorte de sourcing foi aplicado na camada de busca.
     genderKey: str = Field(default="", max_length=12)
     includeUnknownGender: bool = False
+    minimumRequiredKeywordMatches: int = Field(default=0, ge=0, le=12)
 
 
 class IntelligenceRequest(BaseModel):
