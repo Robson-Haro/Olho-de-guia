@@ -513,6 +513,29 @@ class EngineRegressionTests(unittest.TestCase):
         audit = " ".join(str(row[1].value or "") for row in details.iter_rows(min_row=1))
         self.assertIn("Desligada", audit)
 
+    def test_systems_search_rejects_generic_it_profile_without_technical_evidence(self):
+        job = {
+            "title": "Analista de Sistemas",
+            "description": "Integração por APIs, XML e JSON. SAP S/4HANA e TOTVS.",
+            "keywords": ["SAP S/4HANA", "TOTVS", "Integração / APIs"],
+            "country": "Brasil",
+            "countrywide": True,
+            "minimumRequiredKeywordMatches": 2,
+        }
+        generic = {
+            "name": "Perfil genérico", "title": "Information Technology Analyst",
+            "summary": "Software development and technology analysis", "country": "Brasil",
+        }
+        aderente = {
+            "name": "Perfil aderente", "title": "Analista de Sistemas SAP",
+            "summary": "SAP S/4HANA, TOTVS Protheus e integrações com APIs REST e JSON.",
+            "country": "Brasil",
+        }
+        _, ranked, expansion = rank_candidates(job, [generic, aderente])
+        self.assertEqual(["Perfil aderente"], [candidate["name"] for candidate in ranked])
+        self.assertEqual(["Perfil genérico"], [candidate["name"] for candidate in expansion])
+        self.assertIn("evidência técnica insuficiente", expansion[0]["eligibilityReason"])
+
 
 if __name__ == "__main__":
     unittest.main()
