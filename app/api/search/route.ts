@@ -21,6 +21,7 @@ type SearchRequest = {
   nationwide?: boolean;
   maxCandidates?: number;
   strictRequiredKeywords?: boolean;
+  minimumRequiredKeywordMatches?: number;
   genderKey?: string;
   includeUnknownGender?: boolean;
 };
@@ -117,7 +118,10 @@ export async function POST(request: Request) {
       requiredKeywordConcepts,
       countrywide,
       maxCandidates,
-      strictRequiredKeywords: body.strictRequiredKeywords === true,
+      strictRequiredKeywords: body.strictRequiredKeywords !== false,
+      minimumRequiredKeywordMatches: Number.isFinite(Number(body.minimumRequiredKeywordMatches))
+        ? Math.max(1, Math.min(12, Math.trunc(Number(body.minimumRequiredKeywordMatches))))
+        : undefined,
       genderKey,
       includeUnknownGender: body.includeUnknownGender === true,
     });
