@@ -918,7 +918,13 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             # não evidência de senioridade menor: nesse caso o perfil segue como
             # "a confirmar" em vez de ser descartado.
             seniority_eligible = evidence_tokens < 12
-    eligible = family_eligible and seniority_eligible
+    configured_minimum = int(job.get("minimumRequiredKeywordMatches") or 0)
+    minimum_required_matches = (
+        min(
+            len(intelligence.required_keywords),
+            max(1, configured_minimum or (2 if len(intelligence.required_keywords) >= 3 else 1)),
+        ) if intelligence.required_keywords else 0
+    )
     if intelligence.family and candidate_family == intelligence.family:
         # Estar na mesma família profissional é um bom sinal, mas não prova
         # aderência ao cargo: um Analista e um Diretor pertencem à mesma
@@ -945,6 +951,8 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
 
     matches = skill_matches(intelligence.skills, candidate_text)
     matched_required, missing_required = keyword_evidence(intelligence.required_keywords, candidate_text)
+    required_eligible = len(matched_required) >= minimum_required_matches
+    eligible = family_eligible and seniority_eligible and required_eligible
     skill_denominator = min(max(len(intelligence.skills), 1), 6)
     visible_match_count = min(len(matches), skill_denominator)
     skill_score = min(30.0, (visible_match_count / skill_denominator) * 30.0)
@@ -1007,6 +1015,8 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             if not family_eligible else
             "senioridade incompatível com a vaga"
             if not seniority_eligible else
+            f"evidência técnica insuficiente ({len(matched_required)}/{minimum_required_matches} requisito(s) mínimos)"
+            if not required_eligible else
             "família a confirmar no perfil; título e senioridade compatíveis"
             if family_unconfirmed else
             "família profissional e senioridade compatíveis"
