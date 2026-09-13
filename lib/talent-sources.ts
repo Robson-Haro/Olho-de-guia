@@ -31,6 +31,8 @@ export type TalentSearchInput = {
   maxCandidates: number;
   /** Quando verdadeiro, elimina quem não evidencia TODOS os conceitos obrigatórios. */
   strictRequiredKeywords?: boolean;
+  /** Mínimo de critérios técnicos visíveis para entrar na shortlist. */
+  minimumRequiredKeywordMatches?: number;
   /** Chave de gênero: vazio desliga a inferência por completo. */
   genderKey?: GenderKey;
   /** Mantém na lista os perfis cujo gênero não pôde ser identificado. */
@@ -109,7 +111,7 @@ const PROVIDER = {
  * no Serper; pedir 11 a 100 resultados custa 2 créditos. Por isso paginamos de
  * 10 em 10: é o modo mais barato por perfil encontrado.
  */
-const SEARCH_BUDGET = Math.max(4, Math.min(16, Number(process.env.EUREKA_SERPER_BUDGET) || 8));
+const SEARCH_BUDGET = Math.max(8, Math.min(24, Number(process.env.EUREKA_SERPER_BUDGET) || 14));
 const RESULTS_PER_QUERY = 10;
 const PARALLEL_BATCH = 3;
 const SERPER_TIMEOUT_MS = Math.max(6000, Number(process.env.EUREKA_SERPER_TIMEOUT_MS) || 12000);
@@ -236,6 +238,10 @@ export type RequiredKeywordConcept = {
 };
 
 const REQUIRED_KEYWORD_EQUIVALENTS: Record<string, string[]> = {
+  "SAP S/4HANA": ["sap s/4hana", "sap s4hana", "s/4hana", "s4 hana", "sap hana"],
+  "TOTVS": ["totvs", "totvs protheus", "protheus"],
+  "Integração / APIs": ["integração", "integracao", "api", "apis", "api rest", "rest api", "webservice", "webservices", "soap"],
+  "XML / JSON": ["xml", "json", "javascript object notation"],
   "Couro / Leather": [
     "couro", "couros", "leather", "leather industry", "cuero", "cueros", "piel",
   ],
@@ -567,6 +573,9 @@ function calculateCompatibility(
   const seniority = seniorityAlignment(jobLevel?.key || null, candidateLevel?.key || null);
 
   const requiredEvidence = requiredKeywordEvidence(candidateText, input.keywords, input.requiredKeywordConcepts);
+  const minimumRequiredMatches = requiredEvidence.concepts.length >= 3
+    ? Math.min(requiredEvidence.concepts.length, Math.max(2, input.minimumRequiredKeywordMatches || 2))
+    : requiredEvidence.concepts.length ? 1 : 0;
   const keywordPhrases = requiredEvidence.concepts.length
     ? requiredEvidence.concepts.map((concept) => concept.label)
     : descriptionTerms(input.description);
@@ -652,6 +661,7 @@ function calculateCompatibility(
       ruido: -noise.penalty,
       segmento: segmentScore,
     },
+    minimumRequiredMatches,
   };
 }
 
@@ -729,7 +739,10 @@ function serperCandidate(
   // definitiva quem não repete ali todas as palavras obrigatórias produzia
   // falso negativo em massa. Agora a evidência vira classificação (A/B/C) e a
   // eliminação só ocorre quando o modo estrito é pedido explicitamente.
-  if (input.strictRequiredKeywords && score.tier !== "A") return null;
+  // Uma busca ampla não pode completar a shortlist com perfil genérico.
+  // Para três ou mais requisitos, são necessárias ao menos duas evidências.
+  if (score.matchedRequiredKeywords.length < score.minimumRequiredMatches) return null;
+  if (input.strictRequiredKeywords && score.tier === "C") return null;
 
   // CHAVE DE GÊNERO. Aplicada por último, de propósito: só chega aqui quem já
   // foi aprovado por cargo, senioridade, critérios obrigatórios e geografia.
@@ -892,11 +905,14 @@ function buildSearchPlan(input: TalentSearchInput) {
     if (query) searches.push({ query, page, targetCities, layer });
   };
 
-  // Camada 1 — âncora: título exato + UM conceito prioritário + geografia.
+  // Camada 1 — título exato + cada tecnologia prioritária + geografia.
+  // A busca nacional anterior consultava só o primeiro requisito e perdia
+  // grande parte dos perfis indexados para as demais tecnologias.
   const primaryTitle = exactPhrase(titles[0] || input.title);
-  for (const [index, targetCities] of groups.slice(0, 3).entries()) {
-    const concept = conceptExpressions[index % conceptExpressions.length] || semanticExpression;
-    push([primaryTitle, concept, geographicQuery(input, targetCities), companies], 1, targetCities, "ancora");
+  for (const targetCities of groups.slice(0, 3)) {
+    for (const concept of conceptExpressions.slice(0, 5)) {
+      push([primaryTitle, concept || semanticExpression, geographicQuery(input, targetCities), companies], 1, targetCities, "ancora");
+    }
   }
 
   // Camada 2 — variantes de cargo com apenas o conceito mais distintivo. Exigir
