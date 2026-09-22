@@ -178,7 +178,7 @@ const cityCountOptions = Array.from({ length: 20 }, (_, index) => index + 1);
 export default function HomePage() {
   const [active, setActive] = useState("Visão geral"),
     [jobCode, setJobCode] = useState(""),
-    [candidateLimit, setCandidateLimit] = useState(20),
+    [candidateLimit, setCandidateLimit] = useState(50),
     [loading, setLoading] = useState(false),
     [message, setMessage] = useState("");
   const [importedJob, setImportedJob] = useState<ImportedJob | null>(null);
