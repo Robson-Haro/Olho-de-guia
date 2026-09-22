@@ -128,7 +128,7 @@ export async function POST(request: Request) {
 
     if (!result.configured) {
       return NextResponse.json({
-        error: "O Serper ainda não está configurado. Abra Configurações, cole a chave da API e ative a conexão.",
+        error: "Nenhuma fonte de talentos está configurada. Abra Configurações, cole a chave do Clay ou do Serper e ative a conexão.",
         code: "TALENT_SOURCE_NOT_CONFIGURED",
         completed: false,
         candidates: [],
