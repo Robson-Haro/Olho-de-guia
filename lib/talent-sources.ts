@@ -1134,7 +1134,7 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
   const companyDiscovery = await discoverSegmentCompanies(apiKey, input);
   const enrichedInput = { ...input, mappedCompanies: companyDiscovery.companies };
   const plan = buildSearchPlan(enrichedInput);
-  const maxCandidates = Math.min(20, Math.max(1, Math.trunc(input.maxCandidates || 20)));
+  const maxCandidates = Math.min(50, Math.max(1, Math.trunc(input.maxCandidates || 20)));
   const genderAudit: GenderAudit = { matched: 0, opposite: 0, unidentified: 0 };
 
   const parsePayload = (payload: Record<string, unknown> | null, search: SerperSearch, payloadIndex: number) => {
@@ -1212,7 +1212,7 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
 
   return {
     candidates: ranked.slice(0, maxCandidates),
-    pool: ranked.slice(0, Math.max(maxCandidates, 60)),
+    pool: ranked.slice(0, Math.max(maxCandidates * 3, 100)),
     queries,
     poolSize: ranked.length,
     tiers,
@@ -1330,7 +1330,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
   const ranked = orderCandidates(uniquePool);
   return {
     candidates: ranked.slice(0, input.maxCandidates),
-    pool: ranked.slice(0, Math.max(60, input.maxCandidates)),
+    pool: ranked.slice(0, Math.max(input.maxCandidates * 3, 100)),
     mappedCompanies,
     genderAudit,
     providers,
