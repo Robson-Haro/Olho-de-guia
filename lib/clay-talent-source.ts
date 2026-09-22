@@ -54,7 +54,7 @@ function clayQuery(input: TalentSearchInput) {
   if (keyword.length >= 4) {
     conditions.push(`experiences.any(is_current = true and description contains "${quoted(keyword)}")`);
   }
-  return `select from people where ${conditions.join(" and ")} limit ${Math.min(100, Math.max(20, input.maxCandidates * 4))}`;
+  return `select from people where ${conditions.join(" and ")} limit ${Math.min(50, Math.max(20, input.maxCandidates))}`;
 }
 
 async function clayFetch(apiKey: string, path: string, init?: RequestInit) {
@@ -141,7 +141,7 @@ export async function searchClay(apiKey: string, input: TalentSearchInput) {
   if (!searchId) throw new Error("Clay: a busca não retornou um identificador.");
   const page = await clayFetch(apiKey, `/search/query-mode/${encodeURIComponent(searchId)}/run`, {
     method: "POST",
-    body: JSON.stringify({ limit: Math.min(100, Math.max(20, input.maxCandidates * 4)) }),
+    body: JSON.stringify({ limit: Math.min(50, Math.max(20, input.maxCandidates)) }),
   });
   const people = Array.isArray(page.data) ? page.data as ClayPerson[] : [];
   const seen = new Set<string>();
