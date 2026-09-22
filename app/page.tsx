@@ -137,7 +137,7 @@ type JobIntelligence = {
 };
 
 type ProviderSearchStatus = {
-  provider: "serper";
+  provider: "serper" | "clay";
   label: string;
   status: "success" | "error";
   count: number;
@@ -216,11 +216,12 @@ export default function HomePage() {
       "idle" | "working" | "success" | "error"
     >("idle"),
     [configMessage, setConfigMessage] = useState("");
-  const [talentKeys, setTalentKeys] = useState({ serper: "" });
-  const [showTalentKeys, setShowTalentKeys] = useState({ serper: false });
+  const [talentKeys, setTalentKeys] = useState({ serper: "", clay: "" });
+  const [showTalentKeys, setShowTalentKeys] = useState({ serper: false, clay: false });
   const [talentSourceStatus, setTalentSourceStatus] = useState<TalentSourceStatus[]>([]);
-  const [talentIntegration, setTalentIntegration] = useState<Record<"serper", IntegrationState>>({
+  const [talentIntegration, setTalentIntegration] = useState<Record<"serper" | "clay", IntegrationState>>({
     serper: { status: "idle", message: "" },
+    clay: { status: "idle", message: "" },
   });
   const selectedCountryProfile = getCountryProfile(jobForm.countryCode);
   const highAdherenceCount = candidates.filter((candidate) => candidate.compatibility >= 70 && candidate.tier !== "C").length;
@@ -311,7 +312,7 @@ export default function HomePage() {
       );
     }
   }
-  async function configureTalentSource(provider: "serper", action: "test" | "save") {
+  async function configureTalentSource(provider: "serper" | "clay", action: "test" | "save") {
     const apiKey = talentKeys[provider].trim();
     if (!apiKey) {
       setTalentIntegration((current) => ({ ...current, [provider]: { status: "error", message: "Cole a chave da API para continuar." } }));
@@ -714,20 +715,23 @@ export default function HomePage() {
                 <Database size={30} />
               </div>
               <p>
-                Conecte o Serper para localizar perfis públicos do LinkedIn pelo
-                Google. A chave é criptografada e usada apenas no servidor.
+                Conecte o Clay para pesquisar perfis estruturados e o Serper como fonte complementar de perfis públicos do LinkedIn. As chaves são criptografadas e usadas apenas no servidor.
               </p>
               <div className="talentSourceList">
-                {(["serper"] as const).map((provider) => {
+                {(["clay", "serper"] as const).map((provider) => {
                   const configured = talentSourceStatus.find((source) => source.provider === provider)?.configured;
                   const integration = talentIntegration[provider];
-                  const label = "Serper · Busca LinkedIn";
+                  const label = provider === "clay" ? "Clay · Busca estruturada de pessoas" : "Serper · Busca LinkedIn";
+                  const subtitle = provider === "clay" ? "Perfis estruturados, cargo atual, empresa, localização e LinkedIn" : "Perfis públicos do LinkedIn indexados pelo Google";
+                  const helpUrl = provider === "clay" ? "https://app.clay.com/" : "https://serper.dev/";
+                  const helpLabel = provider === "clay" ? "Abrir Clay ou consultar uso da API" : "Criar conta ou consultar saldo no Serper";
+                  const creditNote = provider === "clay" ? "O Clay limita resultados por plano. O Eureka solicita um conjunto amplo, deduplica e só então ranqueia os melhores perfis." : "Cada teste usa 1 consulta. A busca adaptativa usa até 8 consultas curtas do Serper para formar um conjunto amplo antes do ranking. Nenhum enriquecimento é realizado.";
                   return (
                     <section className="talentSource" key={provider}>
                       <div className="sourceHeading">
                         <div>
                           <strong>{label}</strong>
-                          <span>Perfis públicos do LinkedIn indexados pelo Google</span>
+                          <span>{subtitle}</span>
                         </div>
                         <span className={`sourceBadge ${configured ? "connected" : ""}`}>
                           {configured ? "CONECTADA" : "NÃO CONFIGURADA"}
@@ -753,10 +757,10 @@ export default function HomePage() {
                         </div>
                       </label>
                       <small className="creditNote">
-                        Cada teste usa 1 consulta. A busca adaptativa usa até 8 consultas curtas do Serper para formar um conjunto amplo antes do ranking. A conta nova inclui 2.500 consultas gratuitas, sem cartão. Nenhum enriquecimento é realizado.
+                        {creditNote}
                       </small>
-                      <a className="providerHelpLink" href="https://serper.dev/" target="_blank" rel="noreferrer">
-                        Criar conta ou consultar saldo no Serper
+                      <a className="providerHelpLink" href={helpUrl} target="_blank" rel="noreferrer">
+                        {helpLabel}
                       </a>
                       {integration.message && (
                         <div className={`configNotice ${integration.status}`}>
@@ -781,7 +785,7 @@ export default function HomePage() {
               <h3>Como funciona</h3>
               <ol>
                 <li>
-                  <b>Você</b> cadastra a chave do Serper nesta área protegida.
+                  <b>Você</b> cadastra a chave do Clay ou do Serper nesta área protegida.
                 </li>
                 <li>
                   <b>O sistema</b> testa a conexão antes de salvar.
@@ -790,7 +794,7 @@ export default function HomePage() {
                   <b>As analistas</b> inserem somente o código da vaga.
                 </li>
                 <li>
-                  <b>O agente</b> importa a vaga da Gupy, monta a busca X-Ray e consulta perfis públicos do LinkedIn.
+                  <b>O agente</b> importa a vaga da Gupy, consulta o Clay de forma estruturada e usa a busca pública complementar quando ela estiver conectada.
                 </li>
               </ol>
               <div className="privateBadge">

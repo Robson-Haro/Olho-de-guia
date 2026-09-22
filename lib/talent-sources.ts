@@ -1,4 +1,5 @@
 import { getSecret, saveSecret } from "@/lib/secure-settings";
+import { searchClay, testClayKey } from "@/lib/clay-talent-source";
 import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
 import { getMarketSegment } from "@/lib/market-segments";
 import { boundedSearchQuery, extractExplicitCurrentLocation, isExcludedCandidateName } from "@/lib/search-guardrails";
@@ -12,7 +13,7 @@ import {
   type GenderKey,
 } from "@/lib/gender-inference";
 
-export type TalentProvider = "serper";
+export type TalentProvider = "serper" | "clay";
 
 export type TalentSearchInput = {
   title: string;
@@ -50,7 +51,7 @@ export type TalentCandidate = {
   country: string;
   profileUrl: string;
   company?: string;
-  source: "Google via Serper";
+  source: "Google via Serper" | "Clay · Busca estruturada";
   summary?: string;
   compatibility: number;
   matchReason: string;
@@ -104,6 +105,11 @@ export type ProviderSearchStatus = {
 const PROVIDER = {
   key: "talent_source_serper_api_key",
   label: "Serper · Busca LinkedIn",
+} as const;
+
+const CLAY_PROVIDER = {
+  key: "talent_source_clay_api_key",
+  label: "Clay · Busca estruturada de pessoas",
 } as const;
 
 /**
@@ -1225,29 +1231,37 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
 }
 
 export async function getTalentSourceStatuses() {
-  const saved = await getSecret(PROVIDER.key);
-  return [{
-    provider: "serper" as const,
-    label: PROVIDER.label,
-    configured: Boolean(saved),
-    updatedAt: saved?.updatedAt || null,
-  }];
+  const [serper, clay] = await Promise.all([getSecret(PROVIDER.key), getSecret(CLAY_PROVIDER.key)]);
+  return [
+    { provider: "clay" as const, label: CLAY_PROVIDER.label, configured: Boolean(clay), updatedAt: clay?.updatedAt || null },
+    { provider: "serper" as const, label: PROVIDER.label, configured: Boolean(serper), updatedAt: serper?.updatedAt || null },
+  ];
 }
 
 export async function saveTalentSourceKey(provider: TalentProvider, apiKey: string) {
-  if (provider !== "serper") throw new Error("Fonte de talentos inválida.");
-  await saveSecret(PROVIDER.key, apiKey);
+  if (provider === "clay") {
+    await saveSecret(CLAY_PROVIDER.key, apiKey);
+    return;
+  }
+  if (provider === "serper") {
+    await saveSecret(PROVIDER.key, apiKey);
+    return;
+  }
+  throw new Error("Fonte de talentos inválida.");
 }
 
 export async function testTalentSourceKey(provider: TalentProvider, apiKey: string) {
-  if (provider !== "serper") throw new Error("Fonte de talentos inválida.");
-  await callSerper(apiKey, "LinkedIn perfil profissional Talent Acquisition Brasil", 1);
-  return true;
+  if (provider === "clay") return testClayKey(apiKey);
+  if (provider === "serper") {
+    await callSerper(apiKey, "LinkedIn perfil profissional Talent Acquisition Brasil", 1);
+    return true;
+  }
+  throw new Error("Fonte de talentos inválida.");
 }
 
 export async function searchTalentSources(input: TalentSearchInput) {
-  const saved = await getSecret(PROVIDER.key);
-  if (!saved) {
+  const [serperSaved, claySaved] = await Promise.all([getSecret(PROVIDER.key), getSecret(CLAY_PROVIDER.key)]);
+  if (!serperSaved && !claySaved) {
     return {
       candidates: [] as TalentCandidate[],
       pool: [] as TalentCandidate[],
@@ -1258,58 +1272,73 @@ export async function searchTalentSources(input: TalentSearchInput) {
     };
   }
 
-  try {
-    const result = await searchSerper(saved.value, input);
-    const requiredCount = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts).length;
-    const profile = getCountryProfile(input.countryCode);
-    const scope = input.countrywide
-      ? `todo o território de ${profile.name}`
-      : `${input.cities.length} cidade(s) em ${[input.subdivision, profile.name].filter(Boolean).join(" · ")}`;
-    const evidenceNote = requiredCount
-      ? ` Evidência dos ${requiredCount} critério(s) obrigatório(s): ${result.tiers.A} perfil(is) completo(s), ${result.tiers.B} parcial(is), ${result.tiers.C} sem evidência pública.`
-      : "";
-    const genderNote = result.genderAudit
-      ? ` Chave de gênero (${result.genderAudit.key}): ${result.genderAudit.matched} perfil(is) confirmado(s); ${result.genderAudit.opposite} de gênero divergente e ${result.genderAudit.unidentified} sem identificação foram ${result.genderAudit.includeUnknown ? "parcialmente mantidos" : "separados da lista"}.`
-      : "";
-    return {
-      candidates: result.candidates,
-      pool: result.pool,
-      mappedCompanies: result.mappedCompanies,
-      genderAudit: result.genderAudit,
-      providers: [{
-        provider: "serper" as const,
-        label: PROVIDER.label,
-        status: "success" as const,
+  const providers: ProviderSearchStatus[] = [];
+  const candidates: TalentCandidate[] = [];
+  const pool: TalentCandidate[] = [];
+  let mappedCompanies: string[] = [];
+  let genderAudit: GenderAudit | undefined;
+
+  if (claySaved) {
+    try {
+      const result = await searchClay(claySaved.value, input);
+      candidates.push(...result.candidates);
+      pool.push(...result.pool);
+      providers.push({
+        provider: "clay",
+        label: CLAY_PROVIDER.label,
+        status: "success",
         count: result.candidates.length,
         queries: result.queries,
         poolSize: result.poolSize,
         elapsedMs: result.elapsedMs,
-        tiers: result.tiers,
-        mappedCompanies: result.mappedCompanies,
-        genderAudit: result.genderAudit,
-        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope}${result.mappedCompanies.length ? `, mapeou ${result.mappedCompanies.length} empresa(s) do segmento` : ""}, avaliou ${result.poolSize} perfil(is) público(s) e classificou os ${result.candidates.length} melhores.${evidenceNote}${genderNote}`,
-      }],
-      configured: true,
-    };
-  } catch (error) {
-    return {
-      candidates: [] as TalentCandidate[],
-      pool: [] as TalentCandidate[],
-      mappedCompanies: [] as string[],
-      genderAudit: undefined,
-      providers: [{
-        provider: "serper" as const,
-        label: PROVIDER.label,
-        status: "error" as const,
-        count: 0,
-        queries: 0,
-        message: error instanceof Error ? error.message : `${PROVIDER.label}: erro na busca.`,
-      }],
-      configured: true,
-    };
+        message: `${CLAY_PROVIDER.label} executou uma busca estruturada e encontrou ${result.poolSize} perfil(is) com experiência atual compatível.`,
+      });
+    } catch (error) {
+      providers.push({
+        provider: "clay", label: CLAY_PROVIDER.label, status: "error", count: 0, queries: 0,
+        message: error instanceof Error ? error.message : `${CLAY_PROVIDER.label}: erro na busca.`,
+      });
+    }
   }
+
+  if (serperSaved) {
+    try {
+      const result = await searchSerper(serperSaved.value, input);
+      candidates.push(...result.candidates);
+      pool.push(...result.pool);
+      mappedCompanies = result.mappedCompanies;
+      genderAudit = result.genderAudit;
+      const profile = getCountryProfile(input.countryCode);
+      const scope = input.countrywide
+        ? `todo o território de ${profile.name}`
+        : `${input.cities.length} cidade(s) em ${[input.subdivision, profile.name].filter(Boolean).join(" · ")}`;
+      providers.push({
+        provider: "serper", label: PROVIDER.label, status: "success", count: result.candidates.length,
+        queries: result.queries, poolSize: result.poolSize, elapsedMs: result.elapsedMs, tiers: result.tiers,
+        mappedCompanies: result.mappedCompanies, genderAudit: result.genderAudit,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope} e avaliou ${result.poolSize} perfil(is) público(s).`,
+      });
+    } catch (error) {
+      providers.push({
+        provider: "serper", label: PROVIDER.label, status: "error", count: 0, queries: 0,
+        message: error instanceof Error ? error.message : `${PROVIDER.label}: erro na busca.`,
+      });
+    }
+  }
+
+  const uniquePool = deduplicate(pool);
+  const ranked = orderCandidates(uniquePool);
+  return {
+    candidates: ranked.slice(0, input.maxCandidates),
+    pool: ranked.slice(0, Math.max(60, input.maxCandidates)),
+    mappedCompanies,
+    genderAudit,
+    providers,
+    configured: true,
+  };
 }
 
 export function isTalentProvider(value: unknown): value is TalentProvider {
-  return value === "serper";
+  return value === "serper" || value === "clay";
 }
+
