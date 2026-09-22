@@ -24,6 +24,9 @@ type SearchRequest = {
   minimumRequiredKeywordMatches?: number;
   genderKey?: string;
   includeUnknownGender?: boolean;
+  searchRound?: number;
+  excludedProfileUrls?: string[];
+  clayContinuationToken?: string;
 };
 
 function clean(value: unknown, limit = 500) {
@@ -74,6 +77,14 @@ export async function POST(request: Request) {
     const maxCandidates = Number.isFinite(requestedMaximum)
       ? Math.min(50, Math.max(1, Math.trunc(requestedMaximum)))
       : 20;
+    const requestedRound = Number(body.searchRound);
+    const searchRound = Number.isFinite(requestedRound)
+      ? Math.min(7, Math.max(0, Math.trunc(requestedRound)))
+      : 0;
+    const excludedProfileUrls = Array.isArray(body.excludedProfileUrls)
+      ? [...new Set(body.excludedProfileUrls.map((url) => clean(url, 500)).filter(Boolean))].slice(0, 1_000)
+      : [];
+    const clayContinuationToken = clean(body.clayContinuationToken, 3_000);
     const keywords = Array.isArray(body.keywords)
       ? body.keywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 4)
       : [];
@@ -118,12 +129,17 @@ export async function POST(request: Request) {
       requiredKeywordConcepts,
       countrywide,
       maxCandidates,
-      strictRequiredKeywords: body.strictRequiredKeywords !== false,
+      // O modo amplo é o padrão: snippets públicos frequentemente não exibem
+      // todos os requisitos. O recrutador pode optar pelo rigor máximo na tela.
+      strictRequiredKeywords: body.strictRequiredKeywords === true,
       minimumRequiredKeywordMatches: Number.isFinite(Number(body.minimumRequiredKeywordMatches))
         ? Math.max(1, Math.min(12, Math.trunc(Number(body.minimumRequiredKeywordMatches))))
         : undefined,
       genderKey,
       includeUnknownGender: body.includeUnknownGender === true,
+      searchRound,
+      excludedProfileUrls,
+      clayContinuationToken,
     });
 
     if (!result.configured) {
@@ -134,6 +150,7 @@ export async function POST(request: Request) {
         candidates: [],
         pool: [],
         providers: [],
+        continuation: result.continuation,
         strategies,
       }, { status: 503 });
     }
@@ -147,6 +164,7 @@ export async function POST(request: Request) {
         candidates: [],
         pool: [],
         providers: result.providers,
+        continuation: result.continuation,
         strategies,
       }, { status: 502 });
     }
@@ -168,6 +186,7 @@ export async function POST(request: Request) {
       providers: result.providers,
       mappedCompanies: result.mappedCompanies,
       genderAudit: result.genderAudit,
+      continuation: result.continuation,
       strategies,
     });
   } catch (error) {

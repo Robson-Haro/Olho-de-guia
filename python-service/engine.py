@@ -281,13 +281,39 @@ ROLE_FAMILIES: dict[str, dict[str, Any]] = {
         "signals": ("sql", "python", "etl", "spark", "power bi", "tableau", "bigquery", "databricks"),
     },
     "technology": {
-        "label": "Tecnologia / Information Technology",
+        "label": "Sistemas, ERP e Integrações / Information Technology",
         "functions": {
-            "pt": ("tecnologia da informação", "desenvolvimento de software", "sistemas"),
-            "en": ("information technology", "software development", "systems"),
-            "es": ("tecnología de la información", "desarrollo de software", "sistemas"),
+            "pt": ("tecnologia da informação", "desenvolvimento de software", "sistemas", "aplicações corporativas"),
+            "en": ("information technology", "software development", "systems", "enterprise applications"),
+            "es": ("tecnología de la información", "desarrollo de software", "sistemas", "aplicaciones empresariales"),
         },
-        "signals": ("desenvolvedor", "developer", "java", "javascript", "typescript", "cloud", "devops", "api"),
+        "signals": (
+            "desenvolvedor", "developer", "java", "javascript", "typescript", "cloud", "devops", "api",
+            "sap", "s/4hana", "s4 hana", "erp", "totvs", "protheus", "abap", "cpi", "pi/po",
+            "integration suite", "integracao", "integração", "webservice", "idoc", "odata", "rfc",
+            "sustentacao", "sustentação", "application support", "ams",
+        ),
+        "curated_titles": {
+            "pt": (
+                "Analista de Sistemas Sênior", "Analista de Sistemas SAP", "Analista Funcional SAP",
+                "Analista de Integrações", "Analista de Sustentação de Sistemas", "Analista de Aplicações",
+                "Desenvolvedor ABAP", "Consultor SAP CPI/PI/PO",
+            ),
+            "en": (
+                "Senior Systems Analyst", "SAP Systems Analyst", "SAP Functional Analyst",
+                "SAP Integration Analyst", "Systems Integration Analyst", "Application Support Analyst",
+                "SAP ABAP Developer", "SAP CPI/PI/PO Consultant",
+            ),
+            "es": (
+                "Analista Senior de Sistemas", "Analista Funcional SAP", "Analista de Integraciones SAP",
+                "Analista de Soporte de Aplicaciones", "Desarrollador ABAP",
+            ),
+        },
+        "search_titles": (
+            "Senior Systems Analyst", "SAP Systems Analyst", "SAP Functional Analyst",
+            "SAP Integration Analyst", "Systems Integration Analyst", "Application Support Analyst",
+            "SAP ABAP Developer", "Analista de Sistemas SAP", "Analista de Integrações",
+        ),
     },
     "finance": {
         "label": "Finanças / Finance",
@@ -296,7 +322,7 @@ ROLE_FAMILIES: dict[str, dict[str, Any]] = {
             "en": ("finance", "financial planning", "treasury", "controllership"),
             "es": ("finanzas", "planificación financiera", "tesorería", "control de gestión"),
         },
-        "signals": ("fp&a", "budget", "forecast", "fluxo de caixa", "dre", "fechamento", "sap"),
+        "signals": ("fp&a", "budget", "forecast", "fluxo de caixa", "dre", "fechamento"),
     },
     "accounting_tax": {
         "label": "Contabilidade e Fiscal / Accounting & Tax",
@@ -366,6 +392,21 @@ SKILL_GROUPS: dict[str, tuple[str, ...]] = {
     "SQL": ("sql", "structured query language"),
     "Python": ("python",),
     "SAP": ("sap", "s/4hana", "s4 hana"),
+    "SAP Integrações": (
+        "sap integration", "sap integracoes", "sap integrações", "integracao sap", "integração sap", "sap cpi", "sap pi/po", "sap pi po",
+        "integration suite", "idoc", "odata", "rfc", "bapi",
+    ),
+    "Integrações e APIs": (
+        "integracao", "integração", "systems integration", "api", "apis", "rest", "soap",
+        "webservice", "webservices", "middleware", "xml", "json",
+    ),
+    "Sustentação / AMS": (
+        "sustentacao", "sustentação", "application support", "support analyst", "ams", "run support", "l2", "l3",
+    ),
+    "Programação e desenvolvimento": (
+        "programacao", "programação", "desenvolvimento", "development", "developer", "abap",
+        "java", "javascript", "typescript", "c#", "csharp",
+    ),
     "Gupy": ("gupy",),
     "LinkedIn Recruiter": ("linkedin recruiter",),
     "Sourcing": ("sourcing", "busca ativa", "hunting"),
@@ -951,7 +992,13 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
 
     matches = skill_matches(intelligence.skills, candidate_text)
     matched_required, missing_required = keyword_evidence(intelligence.required_keywords, candidate_text)
-    required_eligible = len(matched_required) >= minimum_required_matches
+    # O Google normalmente só disponibiliza um trecho curto do perfil. No modo
+    # amplo, a ausência de um requisito no snippet reduz a classificação para
+    # B/C, mas não reprova duas vezes um profissional já encontrado por uma
+    # faceta técnica. O recrutador pode ativar o modo rigoroso na tela quando
+    # precisar exigir a confirmação pública de múltiplos requisitos.
+    strict_required = job.get("strictRequiredKeywords") is True
+    required_eligible = not strict_required or len(matched_required) >= minimum_required_matches
     eligible = family_eligible and seniority_eligible and required_eligible
     skill_denominator = min(max(len(intelligence.skills), 1), 6)
     visible_match_count = min(len(matches), skill_denominator)
@@ -1016,7 +1063,7 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
             "senioridade incompatível com a vaga"
             if not seniority_eligible else
             f"evidência técnica insuficiente ({len(matched_required)}/{minimum_required_matches} requisito(s) mínimos)"
-            if not required_eligible else
+            if strict_required and not required_eligible else
             "família a confirmar no perfil; título e senioridade compatíveis"
             if family_unconfirmed else
             "família profissional e senioridade compatíveis"

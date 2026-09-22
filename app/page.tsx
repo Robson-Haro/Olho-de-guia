@@ -118,6 +118,8 @@ type JobForm = {
   genderKey: GenderKey;
   /** Mantém na lista quem o sistema não conseguiu identificar. */
   includeUnknownGender: boolean;
+  /** Exige múltiplos requisitos também no trecho público, reduzindo cobertura. */
+  strictRequiredKeywords: boolean;
 };
 
 const GENDER_OPTIONS: Array<{ value: GenderKey; label: string }> = [
@@ -151,10 +153,17 @@ type ProviderSearchStatus = {
 };
 
 type TalentSourceStatus = {
-  provider: "serper";
+  provider: "serper" | "clay";
   label: string;
   configured: boolean;
   updatedAt: string | null;
+};
+
+type SearchContinuation = {
+  hasMore: boolean;
+  nextRound: number | null;
+  clayToken?: string;
+  clayHasMore?: boolean;
 };
 
 type IntegrationState = {
@@ -174,6 +183,50 @@ const nav = [
 
 const candidateLimitOptions = Array.from({ length: 50 }, (_, index) => index + 1);
 const cityCountOptions = Array.from({ length: 20 }, (_, index) => index + 1);
+
+function profileKey(value?: string) {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (url.hostname.toLowerCase().endsWith("linkedin.com") && parts[0]?.toLowerCase() === "in" && parts[1]) {
+      return `linkedin:${parts[1].toLowerCase()}`;
+    }
+  } catch {
+    // A chave de fallback ainda evita repetir a mesma URL textual.
+  }
+  return value.trim().toLowerCase().replace(/\/$/, "");
+}
+
+function uniqueCandidates(values: Candidate[]) {
+  const known = new Set<string>();
+  return values.filter((candidate) => {
+    const key = profileKey(candidate.profileUrl) || `id:${candidate.id}`;
+    if (known.has(key)) return false;
+    known.add(key);
+    return true;
+  });
+}
+
+function uniqueProfileUrls(values: Array<string | undefined>) {
+  const known = new Map<string, string>();
+  values.forEach((value) => {
+    if (!value) return;
+    const key = profileKey(value);
+    if (key && !known.has(key)) known.set(key, value);
+  });
+  return [...known.values()];
+}
+
+function searchSignature(job: JobForm, maxCandidates: number) {
+  return JSON.stringify({
+    title: job.title.trim(), marketSegment: job.marketSegment, countryCode: job.countryCode,
+    subdivision: job.subdivision.trim(), cities: job.cities.map((city) => city.trim()).filter(Boolean),
+    description: job.description.trim(), keywords: job.keywords.map((keyword) => keyword.trim()).filter(Boolean),
+    countrywide: job.countrywide, genderKey: job.genderKey, includeUnknownGender: job.includeUnknownGender,
+    strictRequiredKeywords: job.strictRequiredKeywords, maxCandidates,
+  });
+}
 
 export default function HomePage() {
   const [active, setActive] = useState("Visão geral"),
@@ -195,9 +248,14 @@ export default function HomePage() {
     countrywide: false,
     genderKey: "",
     includeUnknownGender: false,
+    strictRequiredKeywords: false,
   });
   const [genderAudit, setGenderAudit] = useState<GenderAudit | null>(null);
   const [expansionCount, setExpansionCount] = useState(0);
+  const [searchRound, setSearchRound] = useState(0);
+  const [seenProfileUrls, setSeenProfileUrls] = useState<string[]>([]);
+  const [searchContinuation, setSearchContinuation] = useState<SearchContinuation>({ hasMore: false, nextRound: null });
+  const [activeSearchSignature, setActiveSearchSignature] = useState("");
   const [searchStatus, setSearchStatus] = useState<"idle" | "working" | "completed" | "empty" | "error">("idle");
   const [searchMessage, setSearchMessage] = useState("");
   const [searchStrategies, setSearchStrategies] = useState<SearchStrategy[]>([]);
@@ -224,6 +282,15 @@ export default function HomePage() {
     clay: { status: "idle", message: "" },
   });
   const selectedCountryProfile = getCountryProfile(jobForm.countryCode);
+  const currentSearchSignature = searchSignature(jobForm, candidateLimit);
+  const canRequestMore = searchStatus === "completed"
+    && activeSearchSignature === currentSearchSignature
+    && candidates.length > 0
+    && searchContinuation.hasMore;
+  const exhaustedCurrentSearch = searchStatus === "completed"
+    && activeSearchSignature === currentSearchSignature
+    && candidates.length > 0
+    && !searchContinuation.hasMore;
   const highAdherenceCount = candidates.filter((candidate) => candidate.compatibility >= 70 && candidate.tier !== "C").length;
   const stats = [
     { label: "Perfis mapeados", value: String(candidates.length), icon: UsersRound },
@@ -370,7 +437,7 @@ export default function HomePage() {
   }
   function prepareManualJob() {
     setImportedJob(null);
-    setJobForm({ title: "", marketSegment: "", countryCode: "BR", subdivision: "", cityCount: 1, cities: [""], description: "", keywords: ["", "", "", ""], countrywide: false, genderKey: "", includeUnknownGender: false });
+    setJobForm({ title: "", marketSegment: "", countryCode: "BR", subdivision: "", cityCount: 1, cities: [""], description: "", keywords: ["", "", "", ""], countrywide: false, genderKey: "", includeUnknownGender: false, strictRequiredKeywords: false });
     setMessage("Preencha os dados abaixo e inicie a busca.");
     setSearchStatus("idle");
     setSearchStrategies([]);
@@ -380,6 +447,10 @@ export default function HomePage() {
     setPythonEvaluatedCount(0);
     setGenderAudit(null);
     setExpansionCount(0);
+    setSearchRound(0);
+    setSeenProfileUrls([]);
+    setSearchContinuation({ hasMore: false, nextRound: null });
+    setActiveSearchSignature("");
   }
 
   async function requestPythonIntelligence(job: typeof jobForm, profiles: Candidate[] = [], mappedCompanies: string[] = []) {
@@ -401,22 +472,38 @@ export default function HomePage() {
     return response.json();
   }
 
-  async function startSearch() {
+  async function startSearch(mode: "initial" | "more" = "initial") {
     const selectedCities = jobForm.cities.map((city) => city.trim()).filter(Boolean);
     if (!jobForm.title.trim() || !jobForm.description.trim() || (!jobForm.countrywide && !selectedCities.length)) {
       setSearchStatus("error");
       setSearchMessage("Preencha o título, a descrição, o país e ao menos uma cidade antes de buscar.");
       return;
     }
+    const signature = searchSignature(jobForm, candidateLimit);
+    const continueSameSearch = mode === "more"
+      && activeSearchSignature === signature
+      && candidates.length > 0
+      && searchContinuation.hasMore;
+    const priorCandidates = continueSameSearch ? candidates : [];
+    const priorSeenUrls = continueSameSearch ? seenProfileUrls : [];
+    const requestedRound = continueSameSearch ? searchRound + 1 : 0;
+
     setSearchStatus("working");
-    setSearchMessage("Interpretando a vaga em português, inglês e espanhol...");
+    setSearchMessage(continueSameSearch
+      ? `Abrindo a rodada ${requestedRound + 1}: procurando perfis ainda não exibidos...`
+      : "Interpretando a vaga em português, inglês e espanhol...");
     setProviderResults([]);
-    setCandidates([]);
-    setJobIntelligence(null);
-    setPythonRankingActive(false);
-    setPythonEvaluatedCount(0);
-    setGenderAudit(null);
-    setExpansionCount(0);
+    if (!continueSameSearch) {
+      setCandidates([]);
+      setJobIntelligence(null);
+      setPythonRankingActive(false);
+      setPythonEvaluatedCount(0);
+      setGenderAudit(null);
+      setExpansionCount(0);
+      setSearchRound(0);
+      setSeenProfileUrls([]);
+      setSearchContinuation({ hasMore: false, nextRound: null });
+    }
     setExportMessage("");
     try {
       let enrichedSearch = {
@@ -429,7 +516,7 @@ export default function HomePage() {
         requiredKeywordConcepts?: Array<{ label: string; aliases: string[] }>;
       };
       let pythonPrepared = false;
-      let resolvedJobIntelligence: JobIntelligence | null = null;
+      let resolvedJobIntelligence: JobIntelligence | null = continueSameSearch ? jobIntelligence : null;
       try {
         const intelligenceData = await requestPythonIntelligence(jobForm);
         const intelligence = intelligenceData.jobIntelligence as JobIntelligence;
@@ -444,14 +531,22 @@ export default function HomePage() {
           requiredKeywordConcepts: intelligence?.requiredKeywords || [],
         };
         pythonPrepared = true;
-        setSearchMessage("Cargos equivalentes identificados. Consultando perfis públicos do LinkedIn...");
+        setSearchMessage(continueSameSearch
+          ? `Rodada ${requestedRound + 1}: abrindo novas páginas e variações de cargo...`
+          : "Cargos equivalentes identificados. Consultando perfis públicos do LinkedIn...");
       } catch {
         throw new Error("O motor de leitura e senioridade está indisponível. A busca foi interrompida para não exibir candidatos sem validação.");
       }
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...enrichedSearch, maxCandidates: candidateLimit }),
+        body: JSON.stringify({
+          ...enrichedSearch,
+          maxCandidates: candidateLimit,
+          searchRound: requestedRound,
+          excludedProfileUrls: priorSeenUrls,
+          clayContinuationToken: continueSameSearch ? searchContinuation.clayToken || "" : "",
+        }),
       });
       const data = await response.json();
       setSearchStrategies(Array.isArray(data.strategies) ? data.strategies : []);
@@ -459,14 +554,13 @@ export default function HomePage() {
       setGenderAudit(data.genderAudit || null);
       if (!response.ok) throw new Error(data.error || "Não foi possível iniciar a busca.");
       const foundCandidates = Array.isArray(data.candidates) ? data.candidates as Candidate[] : [];
-      // O Python precisa reavaliar o conjunto amplo encontrado pelo Serper,
-      // e não somente os perfis que o TypeScript já colocaria na lista final.
+      // O Python reavalia o conjunto amplo, e não apenas a seleção final do
+      // provedor. Todas as URLs do pool são guardadas para não reaparecerem na
+      // próxima rodada, mesmo que o perfil tenha ficado como "a validar".
       const evaluationPool = Array.isArray(data.pool) && data.pool.length
         ? (data.pool as Candidate[])
         : foundCandidates;
       let rankedCandidates = foundCandidates;
-      // Quantos perfis o motor avaliou e reprovou. Serve para explicar uma
-      // busca sem aprovados em vez de exibir apenas "0 perfis".
       let expansionTotal = 0;
       if (evaluationPool.length && pythonPrepared) {
         try {
@@ -490,31 +584,59 @@ export default function HomePage() {
           throw new Error("Os perfis foram encontrados, mas o motor de aderência não conseguiu validá-los. Nenhum candidato foi exibido.");
         }
       }
+      const previouslyShown = new Set(priorCandidates.map((candidate) => profileKey(candidate.profileUrl)).filter(Boolean));
+      const newCandidates = uniqueCandidates(rankedCandidates)
+        .filter((candidate) => !previouslyShown.has(profileKey(candidate.profileUrl)))
+        .slice(0, candidateLimit);
+      const combinedCandidates = uniqueCandidates([...priorCandidates, ...newCandidates]);
+      const nextSeenUrls = uniqueProfileUrls([...priorSeenUrls, ...evaluationPool.map((candidate) => candidate.profileUrl)]);
+      const continuation = data.continuation && typeof data.continuation === "object"
+        ? data.continuation as SearchContinuation
+        : { hasMore: false, nextRound: null };
       const queriesUsed = Array.isArray(data.providers)
         ? data.providers.reduce((total: number, provider: ProviderSearchStatus) => total + (Number(provider.queries) || 0), 0)
         : 0;
-      const limitedCandidates = rankedCandidates.slice(0, candidateLimit);
       const evaluatedProfiles = Math.max(Number(data.evaluated) || 0, evaluationPool.length);
       const requiredKeywordCount = resolvedJobIntelligence?.requiredKeywords?.length
         ?? jobForm.keywords.filter((keyword) => keyword.trim()).length;
-      setCandidates(limitedCandidates);
-      setSelectedSubdivision(limitedCandidates[0]?.state || (limitedCandidates.length ? "Região não identificada" : ""));
+      setCandidates(combinedCandidates);
+      setSeenProfileUrls(nextSeenUrls);
+      setSearchRound(requestedRound);
+      setSearchContinuation(continuation);
+      setActiveSearchSignature(signature);
+      setSelectedSubdivision(combinedCandidates[0]?.state || (combinedCandidates.length ? "Região não identificada" : ""));
       setSelectedCity("");
-      setSearchStatus(limitedCandidates.length ? "completed" : "empty");
-      setSearchMessage(limitedCandidates.length
-        ? `Busca concluída: ${evaluatedProfiles} perfil(is) público(s) avaliados em ${queriesUsed} consulta(s) e ${limitedCandidates.length} selecionado(s)${requiredKeywordCount ? ` com ${requiredKeywordCount} critério(s) prioritário(s)` : ""}${pythonPrepared ? ", cargos equivalentes em três idiomas" : ""}${limitedCandidates[0]?.rankingEngine ? " e ranking Python confirmado" : ""}.`
-        : `A busca executou ${queriesUsed} consulta(s) e não aprovou nenhum perfil.${
-            data.genderAudit
-              ? ` A chave de gênero (${data.genderAudit.key}) separou ${data.genderAudit.opposite} perfil(is) de gênero divergente e ${data.genderAudit.unidentified} sem identificação — considere marcar "manter perfis não identificados".`
-              : ""
-          }${
-            Number(expansionTotal) > 0
-              ? ` ${expansionTotal} perfil(is) foram avaliados e reprovados; o motivo de cada reprovação está registrado na auditoria.`
-              : ""
-          } Revise o título, os critérios prioritários ou amplie a localização.`);
-      localStorage.setItem("eureka_active_search", JSON.stringify({ ...jobForm, country: selectedCountryProfile.name, cities: selectedCities, maxCandidates: candidateLimit, strategies: data.strategies, candidates: limitedCandidates, providers: data.providers, jobIntelligence: resolvedJobIntelligence, mappedCompanies: data.mappedCompanies || [], createdAt: new Date().toISOString() }));
+      setSearchStatus(combinedCandidates.length ? "completed" : "empty");
+      setSearchMessage(newCandidates.length
+        ? `${continueSameSearch ? `Rodada ${requestedRound + 1}: ` : "Busca concluída: "}${newCandidates.length} perfil(is) inédito(s) selecionado(s) após avaliar ${evaluatedProfiles} perfil(is) público(s) em ${queriesUsed} consulta(s)${continueSameSearch ? ` · ${combinedCandidates.length} perfis acumulados` : ""}${requiredKeywordCount ? ` · ${requiredKeywordCount} critério(s) prioritário(s)` : ""}${pythonPrepared ? " · ranking multilíngue confirmado" : ""}.`
+        : continueSameSearch
+          ? `A rodada ${requestedRound + 1} avaliou ${evaluatedProfiles} perfil(is), mas não encontrou nomes inéditos. ${combinedCandidates.length} perfil(is) anterior(es) foram mantidos${continuation.hasMore ? "; ainda há uma camada adicional para tentar" : "; as fontes disponíveis foram percorridas"}.`
+          : `A busca executou ${queriesUsed} consulta(s) e não aprovou nenhum perfil.${
+              data.genderAudit
+                ? ` A chave de gênero (${data.genderAudit.key}) separou ${data.genderAudit.opposite} perfil(is) de gênero divergente e ${data.genderAudit.unidentified} sem identificação — considere marcar "manter perfis não identificados".`
+                : ""
+            }${
+              Number(expansionTotal) > 0
+                ? ` ${expansionTotal} perfil(is) foram avaliados e reprovados; o motivo de cada reprovação está registrado na auditoria.`
+                : ""
+            } Revise o título, os critérios prioritários ou amplie a localização.`);
+      localStorage.setItem("eureka_active_search", JSON.stringify({
+        ...jobForm,
+        country: selectedCountryProfile.name,
+        cities: selectedCities,
+        maxCandidates: candidateLimit,
+        searchRound: requestedRound,
+        seenProfileUrls: nextSeenUrls,
+        continuation,
+        strategies: data.strategies,
+        candidates: combinedCandidates,
+        providers: data.providers,
+        jobIntelligence: resolvedJobIntelligence,
+        mappedCompanies: data.mappedCompanies || [],
+        createdAt: new Date().toISOString(),
+      }));
     } catch (error) {
-      setSearchStatus("error");
+      setSearchStatus(continueSameSearch && priorCandidates.length ? "completed" : "error");
       setSearchMessage(error instanceof Error ? error.message : "Erro ao iniciar busca.");
     }
   }
@@ -871,7 +993,7 @@ export default function HomePage() {
                     </label>
                   )}
                   <label className="candidateLimitField">
-                    <span>Quantidade de candidatos</span>
+                    <span>Perfis por rodada</span>
                     <select
                       value={candidateLimit}
                       onChange={(event) => setCandidateLimit(Number(event.target.value))}
@@ -894,6 +1016,10 @@ export default function HomePage() {
                     {jobForm.keywords.map((keyword, index) => <input key={index} value={keyword} onChange={(e) => updateKeyword(index, e.target.value)} placeholder={`Palavra-chave ${index + 1}`} />)}
                     <small className="keywordHint">Cada campo vira um critério prioritário. O Eureka aceita equivalentes em português, inglês e espanhol e sinaliza quando a evidência pública precisa ser confirmada no LinkedIn.</small>
                   </fieldset>
+                  <label className="full countrywideToggle strictSearchToggle">
+                    <input type="checkbox" checked={jobForm.strictRequiredKeywords} onChange={(event) => setJobForm({ ...jobForm, strictRequiredKeywords: event.target.checked })} />
+                    <span><strong>Modo rigoroso — exigir múltiplos requisitos no trecho público</strong><small>Desligado por padrão para ampliar a busca: um snippet curto pode mencionar SAP ou integrações, mas não todos os requisitos. Perfis com evidência parcial ficam identificados para validação.</small></span>
+                  </label>
                   <section className="full genderKeyPanel" aria-labelledby="gender-key-title">
                     <div className="genderKeyHeader">
                       <div>
@@ -990,9 +1116,9 @@ export default function HomePage() {
                     </label>
                     <div className="geographyScope"><MapPinned size={18} /><span><strong>Área selecionada:</strong> {geographicLocationLabel(jobForm) || selectedCountryProfile.name}</span></div>
                   </section>
-                  <button className={`primary full searchButton ${searchStatus === "completed" ? "activated" : ""} ${searchStatus === "empty" ? "finishedEmpty" : ""}`} onClick={startSearch} disabled={searchStatus === "working"}>
+                  <button className={`primary full searchButton ${searchStatus === "completed" ? "activated" : ""} ${searchStatus === "empty" ? "finishedEmpty" : ""}`} onClick={() => startSearch(canRequestMore ? "more" : "initial")} disabled={searchStatus === "working"}>
                     {searchStatus === "completed" ? <CheckCircle2 size={21} /> : <Crosshair size={21} />}
-                    {searchStatus === "working" ? "BUSCANDO TALENTOS..." : searchStatus === "completed" ? `BUSCA CONCLUÍDA · ${candidates.length} PERFIS` : searchStatus === "empty" ? "BUSCA FINALIZADA · 0 PERFIS" : "INICIAR BUSCA DE TALENTOS"}
+                    {searchStatus === "working" ? "BUSCANDO TALENTOS..." : canRequestMore ? `BUSCAR +${candidateLimit} PERFIS INÉDITOS` : exhaustedCurrentSearch ? "FONTES PERCORRIDAS · REINICIAR BUSCA" : searchStatus === "completed" ? "INICIAR NOVA BUSCA" : searchStatus === "empty" ? "BUSCA FINALIZADA · 0 PERFIS" : "INICIAR BUSCA DE TALENTOS"}
                   </button>
                   {searchMessage && <div className={`searchSignal full ${searchStatus}`}><span className="signalDot" />{searchMessage}</div>}
                   {providerResults.length > 0 && <div className="providerRunList full">
@@ -1019,7 +1145,7 @@ export default function HomePage() {
                 </div>
                 {message && <div className="notice">{message}</div>}
                 <div className="safe">
-                  <ShieldCheck size={16} /> Até {candidateLimit} candidatos por busca · o Eureka avalia um conjunto amplo antes de selecionar os melhores · chave protegida no servidor
+                  <ShieldCheck size={16} /> Até {candidateLimit} perfis por rodada · novas rodadas pulam URLs já avaliadas · o Eureka amplia o conjunto antes de classificar · chave protegida no servidor
                 </div>
               </article>
               <article className="glass results">
@@ -1031,6 +1157,9 @@ export default function HomePage() {
                   </div>
                   {candidates.length > 0 && <div className="resultActions">
                     {pythonRankingActive && <span className="pythonBadge">PYTHON ATIVO · {pythonEvaluatedCount} PERFIS REAVALIADOS</span>}
+                    {canRequestMore && <button className="moreResultsButton" onClick={() => startSearch("more")}>
+                      <Sparkles size={17} /> BUSCAR +{candidateLimit} INÉDITOS
+                    </button>}
                     <button className="exportButton" onClick={downloadCandidateSpreadsheet} disabled={exportStatus === "working"}>
                       <Download size={17} /> {exportStatus === "working" ? "GERANDO EXCEL..." : "BAIXAR PLANILHA"}
                     </button>

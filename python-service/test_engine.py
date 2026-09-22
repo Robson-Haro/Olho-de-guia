@@ -39,7 +39,47 @@ class TalentEngineTests(unittest.TestCase):
         labels = [concept.label for concept in intelligence.required_keywords]
         self.assertIn("totvs protheus", labels)
         self.assertIn("successfactors employee central", labels)
-        self.assertIn("apis rest", labels)
+        self.assertIn("Integrações e APIs", labels)
+
+    def test_expands_sap_systems_titles_and_technical_families(self):
+        job = {
+            **self.job,
+            "title": "Analista de Sistemas Sênior",
+            "description": (
+                "Requisitos: atuação com SAP S/4HANA, SAP CPI, integrações por APIs REST, XML e JSON, "
+                "sustentação AMS e programação ABAP."
+            ),
+            "keywords": [],
+        }
+        intelligence = analyze_job(job)
+        titles = " | ".join(intelligence.equivalent_titles).lower()
+        labels = [concept.label for concept in intelligence.required_keywords]
+        self.assertEqual("technology", intelligence.family)
+        self.assertIn("sap systems analyst", titles)
+        self.assertIn("systems integration analyst", titles)
+        self.assertIn("SAP", labels)
+        self.assertIn("SAP Integrações", labels)
+        self.assertIn("Sustentação / AMS", labels)
+        self.assertIn("Programação e desenvolvimento", labels)
+
+    def test_standard_mode_keeps_partial_sap_evidence_for_validation(self):
+        job = {
+            **self.job,
+            "title": "Analista de Sistemas Sênior",
+            "description": "Requisitos: SAP S/4HANA, integrações, sustentação e programação ABAP.",
+            "keywords": ["SAP", "integrações", "sustentação", "ABAP"],
+            "strictRequiredKeywords": False,
+        }
+        candidates = [
+            {
+                "name": "Perfil SAP", "title": "Senior SAP Systems Analyst",
+                "summary": "Experiência com SAP S/4HANA em aplicações corporativas.",
+                "city": "São Paulo", "state": "SP", "country": "Brasil",
+            },
+        ]
+        _intelligence, ranked, _expansion = rank_candidates(job, candidates)
+        self.assertEqual(["Perfil SAP"], [candidate["name"] for candidate in ranked])
+        self.assertIn(ranked[0]["tier"], {"B", "C"})
 
     def test_multilingual_equivalent_outranks_unrelated_profile(self):
         candidates = [
@@ -521,6 +561,7 @@ class EngineRegressionTests(unittest.TestCase):
             "country": "Brasil",
             "countrywide": True,
             "minimumRequiredKeywordMatches": 2,
+            "strictRequiredKeywords": True,
         }
         generic = {
             "name": "Perfil genérico", "title": "Information Technology Analyst",
