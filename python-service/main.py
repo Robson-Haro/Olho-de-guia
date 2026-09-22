@@ -35,11 +35,12 @@ class JobInput(BaseModel):
     genderKey: str = Field(default="", max_length=12)
     includeUnknownGender: bool = False
     minimumRequiredKeywordMatches: int = Field(default=0, ge=0, le=12)
+    strictRequiredKeywords: bool = False
 
 
 class IntelligenceRequest(BaseModel):
     job: JobInput
-    candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=120)
+    candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=240)
 
 
 class ExportRequest(BaseModel):

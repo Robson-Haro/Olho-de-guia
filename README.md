@@ -18,11 +18,21 @@ Copie `.env.example` para `.env.local` e configure Supabase, e-mail administrado
 1. Crie uma conta em [serper.dev](https://serper.dev/) e copie a API key.
 2. No Eureka, abra **Configurações > Fontes de talentos**.
 3. Cole a chave em **Serper · Busca LinkedIn** e clique em **Salvar e ativar**.
-4. Cada teste executa uma consulta Serper. A busca adaptativa usa até 8 consultas curtas em camadas — título exato, cargos equivalentes, gênero (quando a chave está ativa), domínio e páginas adicionais — para formar um conjunto amplo e só então selecionar os melhores perfis. O limite pode ser ajustado com `EUREKA_SERPER_BUDGET` (4 a 16). O cadastro inicial do Serper inclui 2.500 consultas gratuitas, sem cartão.
+4. Cada teste executa uma consulta Serper. A busca adaptativa usa páginas e facetas em camadas — título exato, cargos equivalentes, tecnologias, domínio e geografia — para formar um conjunto amplo e só então selecionar os melhores perfis. O limite pode ser ajustado com `EUREKA_SERPER_BUDGET` (8 a 30; padrão 18). Confira o saldo e o plano vigente diretamente no painel do Serper.
 
 Toda consulta respeita um orçamento de 30 palavras: o Google descarta em silêncio o excedente de consultas longas, e era exatamente a geografia — o último bloco — que se perdia. Os blocos são montados por prioridade (cargo → critério → geografia → empresas) e o que não couber é descartado inteiro, nunca cortado no meio de um grupo `OR`.
 
 O backend monta uma pesquisa natural compatível com contas gratuitas do Serper, aceita somente URLs públicas de perfis individuais do LinkedIn e remove duplicidades. Antes da pesquisa, o motor Python identifica cargos equivalentes em português, inglês e espanhol. Cada palavra-chave preenchida é tratada como critério prioritário, com equivalentes multilíngues quando disponíveis; o resultado informa se a evidência pública é completa, parcial ou insuficiente. Depois, o motor reordena os resultados por aderência profissional explicável: função, competências, senioridade e localização visíveis no resultado público. Se o motor Python estiver indisponível, a busca é interrompida em vez de apresentar uma lista não validada. O sistema não faz scraping do LinkedIn e não usa enriquecimento do Apollo.
+
+### Rodadas de descoberta e perfis inéditos
+
+- selecione de 1 a 50 perfis **por rodada**;
+- depois da primeira lista, **Buscar +N perfis inéditos** avança as páginas do Serper, alterna títulos/tecnologias e exclui todas as URLs já avaliadas naquela busca;
+- a deduplicação usa a URL canônica do LinkedIn — variações de subdomínio, barra final e parâmetros não recriam o mesmo perfil;
+- o conector Clay mantém o mesmo cursor de busca entre rodadas, em token cifrado e temporário; ele não reinicia a primeira página;
+- a busca ampla é o padrão: snippets públicos curtos recebem as faixas A/B/C e podem ser validados. O **Modo rigoroso** exige múltiplos requisitos no trecho público e reduz a cobertura.
+
+O motor inclui uma taxonomia própria para Sistemas, ERP e Integrações: SAP S/4HANA, SAP CPI/PI/PO, IDoc, OData, RFC/BAPI, APIs REST/SOAP, XML/JSON, sustentação/AMS e ABAP/desenvolvimento. Isso amplia títulos equivalentes como `SAP Systems Analyst`, `Systems Integration Analyst`, `Application Support Analyst` e `SAP ABAP Developer`.
 
 ### Inteligência geográfica internacional
 
@@ -83,6 +93,6 @@ O Serper fornece título, URL e trecho público indexado pelo Google. Portanto, 
 - Busca de perfis públicos do LinkedIn via Serper
 - Tabela com nome, cargo, empresa, localização, aderência e link clicável
 - Motor Python com cargos equivalentes em três idiomas
-- Quantidade configurável de 1 a 20 candidatos, com interrupção automática da busca ao atingir o limite
+- Quantidade configurável de 1 a 50 perfis por rodada, com continuidade sem repetição
 - Inteligência geográfica internacional com país, região e múltiplas cidades
 - Download da lista em Excel

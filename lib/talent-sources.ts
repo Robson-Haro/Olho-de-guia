@@ -2,6 +2,7 @@ import { getSecret, saveSecret } from "@/lib/secure-settings";
 import { searchClay, testClayKey } from "@/lib/clay-talent-source";
 import { getCountryProfile, normalizeGeographyText } from "@/lib/geography";
 import { getMarketSegment } from "@/lib/market-segments";
+import { canonicalLinkedInProfileUrl } from "@/lib/profile-url";
 import { boundedSearchQuery, extractExplicitCurrentLocation, isExcludedCandidateName } from "@/lib/search-guardrails";
 import { assessCandidateEvidence, type CandidateEvidence } from "@/lib/evidence-scoring";
 import {
@@ -38,6 +39,12 @@ export type TalentSearchInput = {
   genderKey?: GenderKey;
   /** Mantém na lista os perfis cujo gênero não pôde ser identificado. */
   includeUnknownGender?: boolean;
+  /** Rodada atual: 0 é a busca inicial; as demais avançam páginas e facetas. */
+  searchRound?: number;
+  /** URLs já avaliadas nesta busca, para que a continuação só devolva inéditos. */
+  excludedProfileUrls?: string[];
+  /** Cursor opaco do Clay, emitido apenas pelo backend. */
+  clayContinuationToken?: string;
 };
 
 export type CandidateTier = "A" | "B" | "C";
@@ -102,6 +109,13 @@ export type ProviderSearchStatus = {
   };
 };
 
+export type TalentSearchContinuation = {
+  hasMore: boolean;
+  nextRound: number | null;
+  clayToken?: string;
+  clayHasMore?: boolean;
+};
+
 const PROVIDER = {
   key: "talent_source_serper_api_key",
   label: "Serper · Busca LinkedIn",
@@ -117,11 +131,14 @@ const CLAY_PROVIDER = {
  * no Serper; pedir 11 a 100 resultados custa 2 créditos. Por isso paginamos de
  * 10 em 10: é o modo mais barato por perfil encontrado.
  */
-const SEARCH_BUDGET = Math.max(8, Math.min(24, Number(process.env.EUREKA_SERPER_BUDGET) || 14));
+const SEARCH_BUDGET = Math.max(8, Math.min(30, Number(process.env.EUREKA_SERPER_BUDGET) || 18));
 const RESULTS_PER_QUERY = 10;
 const PARALLEL_BATCH = 3;
 const SERPER_TIMEOUT_MS = Math.max(6000, Number(process.env.EUREKA_SERPER_TIMEOUT_MS) || 12000);
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_SERPER_SEARCH_ROUNDS = 7;
+const MAX_SERPER_PAGE = 10;
+const MAX_EVALUATION_POOL = 240;
 
 const SERPER_RETRY_DELAYS_MS = [700, 1800];
 
@@ -245,9 +262,12 @@ export type RequiredKeywordConcept = {
 
 const REQUIRED_KEYWORD_EQUIVALENTS: Record<string, string[]> = {
   "SAP S/4HANA": ["sap s/4hana", "sap s4hana", "s/4hana", "s4 hana", "sap hana"],
+  "SAP Integrações": ["sap integration", "sap integrações", "sap integracoes", "integração sap", "integracao sap", "sap cpi", "sap pi/po", "sap pi po", "idoc", "odata", "rfc", "bapi"],
   "TOTVS": ["totvs", "totvs protheus", "protheus"],
-  "Integração / APIs": ["integração", "integracao", "api", "apis", "api rest", "rest api", "webservice", "webservices", "soap"],
+  "Integração / APIs": ["integração", "integrações", "integracao", "integracoes", "api", "apis", "api rest", "rest api", "webservice", "webservices", "soap"],
   "XML / JSON": ["xml", "json", "javascript object notation"],
+  "Sustentação / AMS": ["sustentação", "sustentacao", "application support", "support analyst", "ams", "run support", "l2", "l3"],
+  "Programação / Desenvolvimento": ["programação", "programacao", "desenvolvimento", "development", "developer", "abap", "java", "javascript", "typescript", "c#", "csharp"],
   "Couro / Leather": [
     "couro", "couros", "leather", "leather industry", "cuero", "cueros", "piel",
   ],
@@ -388,19 +408,7 @@ function geographicEvidence(value: string, input: TalentSearchInput, searchedLoc
 }
 
 function linkedinProfileUrl(value: unknown) {
-  const link = plain(value);
-  if (!link) return "";
-  try {
-    const url = new URL(link);
-    const host = url.hostname.toLowerCase();
-    if (host !== "linkedin.com" && !host.endsWith(".linkedin.com")) return "";
-    if (!url.pathname.toLowerCase().startsWith("/in/")) return "";
-    const slug = url.pathname.split("/").filter(Boolean)[1];
-    if (!slug) return "";
-    return `https://www.linkedin.com/in/${slug}`;
-  } catch {
-    return "";
-  }
+  return canonicalLinkedInProfileUrl(value);
 }
 
 function meaningfulTokens(value: string) {
@@ -741,14 +749,11 @@ function serperCandidate(
   // compensar cargo funcional, senioridade ou geografia explicitamente errados.
   if (!score.eligible) return null;
 
-  // O trecho público do Google tem cerca de 160 caracteres. Eliminar de forma
-  // definitiva quem não repete ali todas as palavras obrigatórias produzia
-  // falso negativo em massa. Agora a evidência vira classificação (A/B/C) e a
-  // eliminação só ocorre quando o modo estrito é pedido explicitamente.
-  // Uma busca ampla não pode completar a shortlist com perfil genérico.
-  // Para três ou mais requisitos, são necessárias ao menos duas evidências.
-  if (score.matchedRequiredKeywords.length < score.minimumRequiredMatches) return null;
-  if (input.strictRequiredKeywords && score.tier === "C") return null;
+  // O trecho público do Google costuma ter poucas palavras. Em modo padrão,
+  // uma evidência parcial (ou ausente) vira classificação B/C para validação,
+  // sem apagar um Analista SAP aderente só porque o snippet mostrou CPI e não
+  // S/4HANA. A regra de múltiplas evidências fica disponível no modo rigoroso.
+  if (input.strictRequiredKeywords && score.matchedRequiredKeywords.length < score.minimumRequiredMatches) return null;
 
   // CHAVE DE GÊNERO. Aplicada por último, de propósito: só chega aqui quem já
   // foi aprovado por cargo, senioridade, critérios obrigatórios e geografia.
@@ -803,6 +808,48 @@ type SerperSearch = {
   targetCities: string[];
   layer: "ancora" | "variante" | "dominio" | "profundidade" | "adaptativa" | "genero";
 };
+
+function currentSearchRound(input: TalentSearchInput) {
+  const requested = Number(input.searchRound);
+  if (!Number.isFinite(requested)) return 0;
+  return Math.min(MAX_SERPER_SEARCH_ROUNDS, Math.max(0, Math.trunc(requested)));
+}
+
+function rotateFacet<T>(values: T[], offset: number) {
+  if (values.length < 2) return values;
+  const start = offset % values.length;
+  return [...values.slice(start), ...values.slice(0, start)];
+}
+
+function pageForRound(basePage: number, input: TalentSearchInput) {
+  return Math.min(MAX_SERPER_PAGE, basePage + currentSearchRound(input));
+}
+
+function searchBudgetFor(input: TalentSearchInput) {
+  // Mais candidatos solicitados pedem mais páginas e ângulos, mas não gastam
+  // o orçamento máximo em uma busca pequena. O teto continua configurável.
+  const desired = Math.max(8, Math.ceil(Math.max(1, input.maxCandidates) / 4) + 6);
+  return Math.min(SEARCH_BUDGET, desired);
+}
+
+function interleaveSearches(searches: SerperSearch[], limit: number) {
+  const layers: SerperSearch["layer"][] = ["ancora", "variante", "dominio", "profundidade", "genero", "adaptativa"];
+  const buckets = new Map(layers.map((layer) => [layer, [] as SerperSearch[]]));
+  searches.forEach((search) => buckets.get(search.layer)?.push(search));
+  const selected: SerperSearch[] = [];
+  while (selected.length < limit) {
+    let appended = false;
+    for (const layer of layers) {
+      const next = buckets.get(layer)?.shift();
+      if (!next) continue;
+      selected.push(next);
+      appended = true;
+      if (selected.length >= limit) break;
+    }
+    if (!appended) break;
+  }
+  return selected;
+}
 
 function simplifiedTitle(value: string) {
   return naturalSearchTerm(value)
@@ -867,6 +914,7 @@ function geographicQuery(input: TalentSearchInput, cities: string[]) {
  * mesmo conjunto de perfis. Aqui cada camada procura por um ângulo diferente.
  */
 function buildSearchPlan(input: TalentSearchInput) {
+  const searchRound = currentSearchRound(input);
   const requiredConcepts = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts);
   const queryConcepts = requiredConcepts.filter((concept) => !requiredConcepts.some((possibleSource) =>
     (REQUIRED_KEYWORD_IMPLICATIONS[possibleSource.label] || []).includes(concept.label),
@@ -879,7 +927,7 @@ function buildSearchPlan(input: TalentSearchInput) {
   // Google raramente exibe todas as competências no pequeno snippet do perfil.
   // Cada conceito recebe uma consulta própria; a confirmação conjunta fica no
   // ranking, onde há classificação A/B/C auditável.
-  const conceptExpressions = conceptGroups.length ? conceptGroups : [""];
+  const conceptExpressions = rotateFacet(conceptGroups.length ? conceptGroups : [""], searchRound);
   const discoveryConcept = conceptExpressions[0]
     || exactPhrase((input.semanticKeywords || []).find((term) => !GENERIC_CORPORATE_TERMS.has(withoutAccents(term))) || "");
   const semanticConcepts = unique((input.semanticKeywords || [])
@@ -894,11 +942,11 @@ function buildSearchPlan(input: TalentSearchInput) {
   // Com a chave de gênero ativa, a forma flexionada do cargo entra na frente da
   // forma genérica. É isso que faz o Google devolver "Coordenadora de
   // Suprimentos" — perfil que a consulta masculina genérica não alcança.
-  const titles = input.genderKey
+  const titles = rotateFacet(input.genderKey
     ? unique(baseTitles.flatMap((title) => [genderedTitle(title, input.genderKey!), title]).filter(Boolean))
-    : baseTitles;
-  const groups = input.countrywide ? [[]] : citySearchGroups(input.cities);
-  const sharedCities = input.countrywide ? [] : input.cities.slice(0, 8);
+    : baseTitles, searchRound);
+  const groups = input.countrywide ? [[]] : rotateFacet(citySearchGroups(input.cities), searchRound);
+  const sharedCities = input.countrywide ? [] : rotateFacet(input.cities.slice(0, 8), searchRound);
   const searches: SerperSearch[] = [];
   const companyExpression = (input.mappedCompanies || []).slice(0, 8).map(exactPhrase).filter(Boolean);
   const companies = companyExpression.length > 1 ? `(${companyExpression.join(" OR ")})` : companyExpression[0] || "";
@@ -915,9 +963,9 @@ function buildSearchPlan(input: TalentSearchInput) {
   // A busca nacional anterior consultava só o primeiro requisito e perdia
   // grande parte dos perfis indexados para as demais tecnologias.
   const primaryTitle = exactPhrase(titles[0] || input.title);
-  for (const targetCities of groups.slice(0, 3)) {
-    for (const concept of conceptExpressions.slice(0, 5)) {
-      push([primaryTitle, concept || semanticExpression, geographicQuery(input, targetCities), companies], 1, targetCities, "ancora");
+  for (const concept of conceptExpressions.slice(0, 5)) {
+    for (const targetCities of groups.slice(0, 3)) {
+      push([primaryTitle, concept || semanticExpression, geographicQuery(input, targetCities), companies], pageForRound(1, input), targetCities, "ancora");
     }
   }
 
@@ -925,7 +973,7 @@ function buildSearchPlan(input: TalentSearchInput) {
   // todos os critérios no snippet do Google diminuía demais a cobertura.
   for (const [index, variant] of titles.slice(1, 6).entries()) {
     const concept = conceptExpressions[index % conceptExpressions.length] || discoveryConcept;
-    push([exactPhrase(variant), concept, geographicQuery(input, sharedCities), companies], 1, sharedCities, "variante");
+    push([exactPhrase(variant), concept, geographicQuery(input, sharedCities), companies], pageForRound(1, input), sharedCities, "variante");
   }
 
   // Camada de gênero — existe somente quando a chave está ativa. O pronome
@@ -935,9 +983,9 @@ function buildSearchPlan(input: TalentSearchInput) {
     const pronouns = genderPronounExpression(input.genderKey);
     const flexedTitle = genderedTitle(input.title, input.genderKey);
     if (flexedTitle) {
-      push([exactPhrase(flexedTitle), discoveryConcept, geographicQuery(input, sharedCities)], 1, sharedCities, "genero");
+      push([exactPhrase(flexedTitle), discoveryConcept, geographicQuery(input, sharedCities)], pageForRound(1, input), sharedCities, "genero");
     }
-    push([primaryTitle, pronouns, geographicQuery(input, sharedCities)], 1, sharedCities, "genero");
+    push([primaryTitle, pronouns, geographicQuery(input, sharedCities)], pageForRound(1, input), sharedCities, "genero");
   }
 
   // Camada 3 — domínio: quem tem a expertise mas usa outro nome de cargo.
@@ -946,25 +994,26 @@ function buildSearchPlan(input: TalentSearchInput) {
     const levelExpression = jobLevel
       ? `(${jobLevel.terms.slice(0, 4).map(exactPhrase).filter(Boolean).join(" OR ")})`
       : "";
-    push([discoveryConcept || semanticExpression, levelExpression, geographicQuery(input, sharedCities), companies], 1, sharedCities, "dominio");
+    push([discoveryConcept || semanticExpression, levelExpression, geographicQuery(input, sharedCities), companies], pageForRound(1, input), sharedCities, "dominio");
   }
 
   // Camada 4 — profundidade progressiva. A página 2 mantém o conceito mais
   // distintivo; a página 3 relaxa os critérios somente para ampliar o pool. O
   // ranking A/B/C continua impedindo que o perfil relaxado passe à frente.
-  push([primaryTitle, discoveryConcept, geographicQuery(input, sharedCities)], 2, sharedCities, "profundidade");
-  push([primaryTitle, geographicQuery(input, sharedCities)], 3, sharedCities, "profundidade");
+  push([primaryTitle, discoveryConcept, geographicQuery(input, sharedCities)], pageForRound(2, input), sharedCities, "profundidade");
+  push([primaryTitle, geographicQuery(input, sharedCities)], pageForRound(3, input), sharedCities, "profundidade");
 
   const seen = new Set<string>();
-  return searches.filter((item) => {
+  const uniqueSearches = searches.filter((item) => {
     const key = `${item.query.toLowerCase()}|${item.page}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-    // Com o mapeamento de empresas deixando de gastar 2 créditos por busca, o
-    // plano inicial pode ocupar mais consultas e ainda sobra folga para a
-    // rodada adaptativa orientada pelos resultados.
-  }).slice(0, Math.max(4, SEARCH_BUDGET - 2));
+  });
+  // Reservamos parte do orçamento para a rodada adaptativa; a seleção em
+  // rodízio impede que a primeira camada consuma tudo e esconda sinônimos,
+  // domínio técnico e páginas profundas.
+  return interleaveSearches(uniqueSearches, Math.max(6, searchBudgetFor(input) - 4));
 }
 
 /**
@@ -979,14 +1028,17 @@ function buildAdaptiveSearchPlan(
 ) {
   const used = new Set(usedSearches.map((item) => `${item.query.toLowerCase()}|${item.page}`));
   const concepts = requiredKeywordConcepts(input.keywords, input.requiredKeywordConcepts);
-  const conceptExpression = concepts
+  // Cada consulta adaptativa leva uma família técnica por vez. Juntar todos os
+  // conceitos com espaço fazia o Google tratá-los como AND e escondia perfis
+  // SAP que evidenciam S/4HANA, CPI ou ABAP em partes diferentes do resumo.
+  const rawConceptExpressions = concepts
     .slice(0, 3)
     .map((concept) => {
       const aliases = concept.aliases.slice(0, 5).map(exactPhrase).filter(Boolean);
       return aliases.length > 1 ? `(${aliases.join(" OR ")})` : aliases[0] || "";
     })
-    .filter(Boolean)
-    .join(" ");
+    .filter(Boolean);
+  const conceptExpressions = rotateFacet(rawConceptExpressions.length ? rawConceptExpressions : [""], currentSearchRound(input));
   const learnedTitles = unique(
     orderCandidates(candidates)
       .map((candidate) => naturalSearchTerm(candidate.title))
@@ -994,8 +1046,8 @@ function buildAdaptiveSearchPlan(
       .slice(0, 8),
   );
   const fallbackTitles = titleVariants(input.title, input.titleVariants).slice(1, 8);
-  const titles = unique([...learnedTitles, ...fallbackTitles]);
-  const cityGroups = input.countrywide ? [[]] : citySearchGroups(input.cities);
+  const titles = rotateFacet(unique([...learnedTitles, ...fallbackTitles]), currentSearchRound(input));
+  const cityGroups = input.countrywide ? [[]] : rotateFacet(citySearchGroups(input.cities), currentSearchRound(input));
   const searches: SerperSearch[] = [];
 
   for (const [index, title] of titles.entries()) {
@@ -1004,16 +1056,18 @@ function buildAdaptiveSearchPlan(
     // voltar ao Google — o aprendizado da rodada anterior não pode desfazer o
     // recorte pedido pelo recrutador.
     const learnedTitle = (input.genderKey && genderedTitle(title, input.genderKey)) || title;
+    const conceptExpression = conceptExpressions[index % conceptExpressions.length] || "";
     const query = boundedSearchQuery([
       "site:linkedin.com/in",
       exactPhrase(learnedTitle),
       conceptExpression,
       geographicQuery(input, targetCities),
     ]);
-    const key = `${query.toLowerCase()}|1`;
-    if (query && !used.has(key)) searches.push({ query, page: 1, targetCities, layer: "adaptativa" });
+    const page = pageForRound(1, input);
+    const key = `${query.toLowerCase()}|${page}`;
+    if (query && !used.has(key)) searches.push({ query, page, targetCities, layer: "adaptativa" });
   }
-  return searches.slice(0, Math.max(0, SEARCH_BUDGET - usedSearches.length));
+  return searches.slice(0, Math.max(0, searchBudgetFor(input) - usedSearches.length));
 }
 
 const responseCache = new Map<string, { at: number; payload: Record<string, unknown> | null }>();
@@ -1110,13 +1164,28 @@ async function discoverSegmentCompanies(apiKey: string, input: TalentSearchInput
 function deduplicate(candidates: TalentCandidate[]) {
   const seen = new Map<string, TalentCandidate>();
   for (const candidate of candidates) {
-    const key = candidate.profileUrl.toLowerCase().replace(/\/$/, "");
+    const key = canonicalLinkedInProfileUrl(candidate.profileUrl) || candidate.profileUrl.toLowerCase().replace(/\/$/, "");
     const existing = seen.get(key);
     // Ao encontrar o mesmo perfil em consultas diferentes, mantém a leitura com
     // mais evidência (maior pontuação), não a primeira que apareceu.
     if (!existing || candidate.compatibility > existing.compatibility) seen.set(key, candidate);
   }
   return [...seen.values()];
+}
+
+function excludedProfileKeys(input: TalentSearchInput) {
+  return new Set(
+    (input.excludedProfileUrls || [])
+      .slice(0, 1_000)
+      .map((url) => canonicalLinkedInProfileUrl(url))
+      .filter(Boolean),
+  );
+}
+
+function excludePreviouslySeen(candidates: TalentCandidate[], input: TalentSearchInput) {
+  const excluded = excludedProfileKeys(input);
+  if (!excluded.size) return candidates;
+  return candidates.filter((candidate) => !excluded.has(canonicalLinkedInProfileUrl(candidate.profileUrl)));
 }
 
 const TIER_ORDER: Record<CandidateTier, number> = { A: 0, B: 1, C: 2 };
@@ -1134,6 +1203,7 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
   const companyDiscovery = await discoverSegmentCompanies(apiKey, input);
   const enrichedInput = { ...input, mappedCompanies: companyDiscovery.companies };
   const plan = buildSearchPlan(enrichedInput);
+  const searchBudget = searchBudgetFor(enrichedInput);
   const maxCandidates = Math.min(50, Math.max(1, Math.trunc(input.maxCandidates || 20)));
   const genderAudit: GenderAudit = { matched: 0, opposite: 0, unidentified: 0 };
 
@@ -1169,16 +1239,16 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
     });
     // Interrompe cedo apenas quando já existe folga real de perfis de primeira
     // linha — nunca antes de ter material suficiente para ranquear.
-    const strongCandidates = deduplicate(pool).filter((candidate) => candidate.tier === "A");
+    const strongCandidates = excludePreviouslySeen(deduplicate(pool), input).filter((candidate) => candidate.tier === "A");
     if (strongCandidates.length >= maxCandidates * 3) break;
   }
 
-  const initialRanked = orderCandidates(deduplicate(pool));
+  const initialRanked = orderCandidates(excludePreviouslySeen(deduplicate(pool), input));
   const initialStrong = initialRanked.filter((candidate) => candidate.tier === "A" || candidate.tier === "B");
   const shouldAdapt = initialRanked.length < maxCandidates * 2 || initialStrong.length < maxCandidates;
-  if (shouldAdapt && talentQueries < SEARCH_BUDGET) {
+  if (shouldAdapt && talentQueries < searchBudget) {
     const adaptivePlan = buildAdaptiveSearchPlan(enrichedInput, initialRanked, plan)
-      .slice(0, SEARCH_BUDGET - talentQueries);
+      .slice(0, searchBudget - talentQueries);
     for (let index = 0; index < adaptivePlan.length; index += PARALLEL_BATCH) {
       const batch = adaptivePlan.slice(index, index + PARALLEL_BATCH);
       const settled = await Promise.allSettled(
@@ -1203,7 +1273,7 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
   // O corte acontece DEPOIS do ranking, nunca antes. Na versão anterior a lista
   // era truncada na ordem do Google e só então ordenada — o ranking existia,
   // mas não influenciava quem entrava na lista.
-  const ranked = orderCandidates(deduplicate(pool));
+  const ranked = orderCandidates(excludePreviouslySeen(deduplicate(pool), input));
   const tiers = {
     A: ranked.filter((candidate) => candidate.tier === "A").length,
     B: ranked.filter((candidate) => candidate.tier === "B").length,
@@ -1212,11 +1282,12 @@ async function searchSerper(apiKey: string, input: TalentSearchInput) {
 
   return {
     candidates: ranked.slice(0, maxCandidates),
-    pool: ranked.slice(0, Math.max(maxCandidates * 3, 100)),
+    pool: ranked.slice(0, Math.min(MAX_EVALUATION_POOL, Math.max(maxCandidates * 4, 120))),
     queries,
     poolSize: ranked.length,
     tiers,
     elapsedMs: Date.now() - startedAt,
+    hasMore: currentSearchRound(input) < MAX_SERPER_SEARCH_ROUNDS && ranked.length > 0,
     mappedCompanies: companyDiscovery.companies,
     genderAudit: input.genderKey
       ? {
@@ -1268,6 +1339,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
       mappedCompanies: [] as string[],
       genderAudit: undefined,
       providers: [] as ProviderSearchStatus[],
+      continuation: { hasMore: false, nextRound: null } as TalentSearchContinuation,
       configured: false,
     };
   }
@@ -1277,12 +1349,17 @@ export async function searchTalentSources(input: TalentSearchInput) {
   const pool: TalentCandidate[] = [];
   let mappedCompanies: string[] = [];
   let genderAudit: GenderAudit | undefined;
+  let clayToken = "";
+  let clayHasMore = false;
+  let serperHasMore = false;
 
   if (claySaved) {
     try {
       const result = await searchClay(claySaved.value, input);
       candidates.push(...result.candidates);
       pool.push(...result.pool);
+      clayToken = result.continuationToken;
+      clayHasMore = result.hasMore;
       providers.push({
         provider: "clay",
         label: CLAY_PROVIDER.label,
@@ -1291,7 +1368,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
         queries: result.queries,
         poolSize: result.poolSize,
         elapsedMs: result.elapsedMs,
-        message: `${CLAY_PROVIDER.label} executou uma busca estruturada e encontrou ${result.poolSize} perfil(is) com experiência atual compatível.`,
+        message: `${CLAY_PROVIDER.label} executou ${result.queries} página(s) estruturada(s) e encontrou ${result.poolSize} perfil(is) inédito(s) com experiência atual compatível${result.hasMore ? "; há mais páginas para a próxima rodada" : ""}.`,
       });
     } catch (error) {
       providers.push({
@@ -1308,6 +1385,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
       pool.push(...result.pool);
       mappedCompanies = result.mappedCompanies;
       genderAudit = result.genderAudit;
+      serperHasMore = result.hasMore;
       const profile = getCountryProfile(input.countryCode);
       const scope = input.countrywide
         ? `todo o território de ${profile.name}`
@@ -1316,7 +1394,7 @@ export async function searchTalentSources(input: TalentSearchInput) {
         provider: "serper", label: PROVIDER.label, status: "success", count: result.candidates.length,
         queries: result.queries, poolSize: result.poolSize, elapsedMs: result.elapsedMs, tiers: result.tiers,
         mappedCompanies: result.mappedCompanies, genderAudit: result.genderAudit,
-        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope} e avaliou ${result.poolSize} perfil(is) público(s).`,
+        message: `${PROVIDER.label} executou ${result.queries} consulta(s) em ${(result.elapsedMs / 1000).toFixed(1)}s para ${scope}, avaliou ${result.poolSize} perfil(is) público(s) inéditos${result.hasMore ? "; novas páginas estão disponíveis" : ""}.`,
       });
     } catch (error) {
       providers.push({
@@ -1326,14 +1404,20 @@ export async function searchTalentSources(input: TalentSearchInput) {
     }
   }
 
-  const uniquePool = deduplicate(pool);
+  const uniquePool = excludePreviouslySeen(deduplicate(pool), input);
   const ranked = orderCandidates(uniquePool);
+  const hasMore = clayHasMore || serperHasMore;
   return {
     candidates: ranked.slice(0, input.maxCandidates),
-    pool: ranked.slice(0, Math.max(input.maxCandidates * 3, 100)),
+    pool: ranked.slice(0, Math.min(MAX_EVALUATION_POOL, Math.max(input.maxCandidates * 4, 120))),
     mappedCompanies,
     genderAudit,
     providers,
+    continuation: {
+      hasMore,
+      nextRound: hasMore ? currentSearchRound(input) + 1 : null,
+      ...(clayToken ? { clayToken, clayHasMore } : {}),
+    } satisfies TalentSearchContinuation,
     configured: true,
   };
 }
@@ -1341,4 +1425,3 @@ export async function searchTalentSources(input: TalentSearchInput) {
 export function isTalentProvider(value: unknown): value is TalentProvider {
   return value === "serper" || value === "clay";
 }
-
