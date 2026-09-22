@@ -172,7 +172,7 @@ const nav = [
   { icon: Settings, label: "Configurações", admin: true },
 ];
 
-const candidateLimitOptions = Array.from({ length: 20 }, (_, index) => index + 1);
+const candidateLimitOptions = Array.from({ length: 50 }, (_, index) => index + 1);
 const cityCountOptions = Array.from({ length: 20 }, (_, index) => index + 1);
 
 export default function HomePage() {

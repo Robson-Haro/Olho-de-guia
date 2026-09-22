@@ -72,7 +72,7 @@ export async function POST(request: Request) {
     const countrywide = body.countrywide === true || body.nationwide === true;
     const requestedMaximum = Number(body.maxCandidates);
     const maxCandidates = Number.isFinite(requestedMaximum)
-      ? Math.min(20, Math.max(1, Math.trunc(requestedMaximum)))
+      ? Math.min(50, Math.max(1, Math.trunc(requestedMaximum)))
       : 20;
     const keywords = Array.isArray(body.keywords)
       ? body.keywords.map((item) => clean(item, 80)).filter(Boolean).slice(0, 4)

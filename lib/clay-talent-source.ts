@@ -152,7 +152,7 @@ export async function searchClay(apiKey: string, input: TalentSearchInput) {
   }).sort((a, b) => b.compatibility - a.compatibility);
   return {
     candidates: pool.slice(0, input.maxCandidates),
-    pool: pool.slice(0, Math.max(60, input.maxCandidates)),
+    pool: pool.slice(0, Math.max(100, input.maxCandidates * 2)),
     queries: 1,
     poolSize: pool.length,
     elapsedMs: Date.now() - startedAt,
