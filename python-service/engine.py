@@ -1042,10 +1042,11 @@ def rank_candidate(job: dict[str, Any], intelligence: JobIntelligence, candidate
     tier = supplied_tier if supplied_tier in {"A", "B", "C"} else default_tier
     if missing_required and tier == "A":
         tier = default_tier
-    # A evidência parcial reduz a nota, mas não elimina o profissional: o
-    # trecho público do Google raramente repete todos os critérios.
+    # Evidência parcial com cargo compatível e requisito confirmado recebe
+    # menos desconto; ausência de evidência continua com o desconto original.
     if tier == "B":
-        compatibility = round(compatibility * 0.78)
+        partial_evidence_confirmed = bool(matched_required) and best_title_similarity >= 0.4
+        compatibility = round(compatibility * (0.85 if partial_evidence_confirmed else 0.78))
     elif tier == "C":
         compatibility = round(compatibility * 0.55)
     tier_label = {
