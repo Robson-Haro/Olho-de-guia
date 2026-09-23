@@ -183,6 +183,7 @@ const nav = [
 
 const candidateLimitOptions = Array.from({ length: 50 }, (_, index) => index + 1);
 const cityCountOptions = Array.from({ length: 20 }, (_, index) => index + 1);
+const SEARCH_HISTORY_TTL_MS = 24 * 60 * 60 * 1000;
 
 function profileKey(value?: string) {
   if (!value) return "";
@@ -226,6 +227,30 @@ function searchSignature(job: JobForm, maxCandidates: number) {
     countrywide: job.countrywide, genderKey: job.genderKey, includeUnknownGender: job.includeUnknownGender,
     strictRequiredKeywords: job.strictRequiredKeywords, maxCandidates,
   });
+}
+
+/** Mantém, por 24 horas, os perfis já avaliados para a mesma vaga. */
+function searchHistoryKey(job: JobForm) {
+  return `eureka_seen_profiles:${searchSignature(job, 0)}`;
+}
+
+function readSearchHistory(job: JobForm) {
+  if (typeof window === "undefined") return [] as string[];
+  try {
+    const saved = JSON.parse(localStorage.getItem(searchHistoryKey(job)) || "{}") as { updatedAt?: string; profileUrls?: string[] };
+    const updatedAt = Date.parse(saved.updatedAt || "");
+    if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > SEARCH_HISTORY_TTL_MS) return [];
+    return uniqueProfileUrls(Array.isArray(saved.profileUrls) ? saved.profileUrls : []);
+  } catch { return []; }
+}
+
+function saveSearchHistory(job: JobForm, profileUrls: string[]) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(searchHistoryKey(job), JSON.stringify({
+      updatedAt: new Date().toISOString(), profileUrls: uniqueProfileUrls(profileUrls).slice(-1_000),
+    }));
+  } catch { /* armazenamento é opcional; a busca continua funcional. */ }
 }
 
 export default function HomePage() {
@@ -485,7 +510,11 @@ export default function HomePage() {
       && candidates.length > 0
       && searchContinuation.hasMore;
     const priorCandidates = continueSameSearch ? candidates : [];
-    const priorSeenUrls = continueSameSearch ? seenProfileUrls : [];
+    // Reexecutar a mesma vaga, inclusive após recarregar a página, nunca reinicia nomes já avaliados.
+    const priorSeenUrls = uniqueProfileUrls([
+      ...(continueSameSearch ? seenProfileUrls : readSearchHistory(jobForm)),
+      ...priorCandidates.map((candidate) => candidate.profileUrl),
+    ]);
     const requestedRound = continueSameSearch ? searchRound + 1 : 0;
 
     setSearchStatus("working");
@@ -601,6 +630,7 @@ export default function HomePage() {
         ?? jobForm.keywords.filter((keyword) => keyword.trim()).length;
       setCandidates(combinedCandidates);
       setSeenProfileUrls(nextSeenUrls);
+      saveSearchHistory(jobForm, nextSeenUrls);
       setSearchRound(requestedRound);
       setSearchContinuation(continuation);
       setActiveSearchSignature(signature);
