@@ -131,7 +131,8 @@ const CLAY_PROVIDER = {
  * no Serper; pedir 11 a 100 resultados custa 2 créditos. Por isso paginamos de
  * 10 em 10: é o modo mais barato por perfil encontrado.
  */
-const SEARCH_BUDGET = Math.max(8, Math.min(30, Number(process.env.EUREKA_SERPER_BUDGET) || 18));
+// Mais profundidade melhora a chance de encontrar evidência técnica, não apenas títulos parecidos.
+const SEARCH_BUDGET = Math.max(8, Math.min(30, Number(process.env.EUREKA_SERPER_BUDGET) || 24));
 const RESULTS_PER_QUERY = 10;
 const PARALLEL_BATCH = 3;
 const SERPER_TIMEOUT_MS = Math.max(6000, Number(process.env.EUREKA_SERPER_TIMEOUT_MS) || 12000);
